@@ -6,6 +6,7 @@ plugin_hooks = true
 [plugins."tracing@codex-observability-plugin"]
 enabled = true
 
-[hooks.state."tracing@codex-observability-plugin:hooks/hooks.json:stop:0:0"]
-trusted_hash = "sha256:69a05cbfa6984ec5f1433343b45480d5239c119e7332ae863f9865edc2efec74"
+[plugins."rcore-session-archive@rcore-tutorial-2025s"]
 enabled = true
+
+# Hook trust is reviewed and stored on each student's machine via /hooks.
