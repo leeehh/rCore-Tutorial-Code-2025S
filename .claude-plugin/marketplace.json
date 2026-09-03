@@ -1,0 +1,14 @@
+{
+  "name": "rcore-tutorial-2025s",
+  "owner": {
+    "name": "rCore Tutorial teaching team"
+  },
+  "description": "Repository-local plugins used by the rCore operating-system labs",
+  "plugins": [
+    {
+      "name": "rcore-session-archive",
+      "source": "./plugins/rcore-session-archive",
+      "description": "Archives Codex and Claude Code transcripts inside the local rCore checkout"
+    }
+  ]
+}

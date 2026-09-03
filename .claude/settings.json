@@ -1,6 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "rcore-tutorial-2025s": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  },
   "enabledPlugins": {
-    "langfuse-observability@langfuse-observability": true
+    "langfuse-observability@langfuse-observability": true,
+    "rcore-session-archive@rcore-tutorial-2025s": true
   }
 }

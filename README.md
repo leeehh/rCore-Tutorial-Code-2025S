@@ -30,6 +30,7 @@
 # setup build&run environment first
 $ git clone https://github.com/LearningOS/rCore-Tutorial-Code-2025S.git
 $ cd rCore-Tutorial-Code-2025S
+$ ./scripts/setup-agent-plugins.sh
 $ git clone https://github.com/LearningOS/rCore-Tutorial-Test-2025S.git user
 $ git checkout ch$ID
 $ cd os
@@ -37,6 +38,13 @@ $ cd os
 $ make run
 ```
 Notice: $ID is from [1-9]
+
+The agent setup script installs the repository-local session archive plugin for
+Codex and/or Claude Code. Run it from the `main` branch before checking out a
+lab branch. Use `./scripts/setup-agent-plugins.sh codex` or
+`./scripts/setup-agent-plugins.sh claude` to configure only one agent. The
+official Langfuse upload plugin and per-student credentials remain separate.
+Local transcripts are stored in `.agent-sessions/`, which is excluded from Git.
 
 ### Grading
 
