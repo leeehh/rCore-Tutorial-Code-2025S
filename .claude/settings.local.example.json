@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "LANGFUSE_PUBLIC_KEY": "pk-lf-由助教提供",
+    "LANGFUSE_SECRET_KEY": "sk-lf-由助教提供",
+    "LANGFUSE_BASE_URL": "https://lihh18-nuc.tail6722a8.ts.net",
+    "CC_LANGFUSE_CAPTURE_IMAGES": "false"
+  }
+}
