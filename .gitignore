@@ -27,3 +27,6 @@ os/vendor/
 
 # Per-machine Langfuse credentials for Claude Code.
 .claude/settings.local.json
+
+# Raw local coding-agent transcripts. These may contain sensitive data.
+.agent-sessions/
