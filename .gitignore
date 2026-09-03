@@ -1,0 +1,8 @@
+# Keep shared code-agent configuration tracked.
+!.codex/config.toml
+!.codex/langfuse.json
+!.claude/settings.json
+!.claude/settings.local.example.json
+
+# Per-machine Langfuse credentials for Claude Code.
+.claude/settings.local.json
