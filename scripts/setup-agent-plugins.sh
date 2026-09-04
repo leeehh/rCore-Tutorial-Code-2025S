@@ -145,6 +145,42 @@ require_python() {
     fi
 }
 
+prepare_archive_config() {
+    local template_path="${REPOSITORY_ROOT}/.agents/session-archive.example.json"
+    local config_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
+
+    if [[ ! -e "${config_path}" ]]; then
+        (umask 077; cp "${template_path}" "${config_path}")
+        echo "Created local session archive configuration: ${config_path}"
+    elif [[ ! -f "${config_path}" ]]; then
+        echo "error: archive configuration is not a regular file: ${config_path}" >&2
+        return 1
+    else
+        echo "Keeping existing local session archive configuration: ${config_path}"
+    fi
+    chmod 600 "${config_path}"
+
+    python3 - "${config_path}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+try:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"error: cannot read archive configuration: {error}")
+
+allowed_modes = {"messages", "tool-calls", "full"}
+mode = config.get("mode") if isinstance(config, dict) else None
+if mode not in allowed_modes:
+    choices = ", ".join(sorted(allowed_modes))
+    raise SystemExit(
+        f"error: archive mode must be one of {choices}; found {mode!r}"
+    )
+PY
+}
+
 require_node_22() {
     if ! command -v node >/dev/null 2>&1; then
         echo "error: Node.js 22 or newer is required by the Langfuse Codex plugin" >&2
@@ -364,6 +400,7 @@ main() {
 
     require_python
     resolve_marketplace_source
+    prepare_archive_config
 
     case "${target}" in
         auto)
@@ -398,7 +435,9 @@ main() {
 
     cat <<'EOF'
 
-Local transcripts will be stored under .agent-sessions/ and will not be committed.
+Local session archives will be stored under .agent-sessions/ and will not be committed.
+The default archive mode is messages-only; edit .agents/session-archive.json
+to select tool-calls or full mode.
 Credentials are stored only in this repository's ignored configuration files.
 Codex users must trust this repository and review its hooks with /hooks on first use.
 Claude Code users should restart Claude Code or run /reload-plugins.

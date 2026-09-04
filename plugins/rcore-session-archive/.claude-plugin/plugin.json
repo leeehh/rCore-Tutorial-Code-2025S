@@ -1,7 +1,7 @@
 {
   "name": "rcore-session-archive",
-  "version": "0.1.0",
-  "description": "Archives coding-agent transcripts inside the local rCore checkout",
+  "version": "0.2.0",
+  "description": "Archives privacy-filtered coding-agent transcripts inside the local rCore checkout",
   "author": {
     "name": "rCore Tutorial teaching team"
   }

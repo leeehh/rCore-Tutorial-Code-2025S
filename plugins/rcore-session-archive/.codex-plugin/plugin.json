@@ -1,14 +1,14 @@
 {
   "name": "rcore-session-archive",
-  "version": "0.1.0",
-  "description": "Archives coding-agent transcripts inside the local rCore checkout",
+  "version": "0.2.0+codex.20260904104743",
+  "description": "Archives privacy-filtered coding-agent transcripts inside the local rCore checkout",
   "author": {
     "name": "rCore Tutorial teaching team"
   },
   "interface": {
     "displayName": "rCore Session Archive",
-    "shortDescription": "Keep a local copy of each coding-agent session.",
-    "longDescription": "Copies Codex and Claude Code transcripts into the hidden .agent-sessions directory in the current rCore checkout.",
+    "shortDescription": "Keep a configurable local archive of each agent session.",
+    "longDescription": "Archives Codex and Claude Code sessions under .agent-sessions using a repository-local privacy mode: messages only, messages plus tool calls, or the full raw transcript.",
     "developerName": "rCore Tutorial teaching team",
     "category": "Productivity",
     "capabilities": [],
