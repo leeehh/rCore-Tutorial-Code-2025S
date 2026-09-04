@@ -23,8 +23,23 @@ Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all]
   all     Require and configure both Codex and Claude Code.
 
 Plugins are disabled in the user configuration and enabled by this repository's
-tracked project configuration. Langfuse credentials are configured separately.
+tracked project configuration. Private credential files are created in this
+repository from tracked templates and are excluded from Git.
 EOF
+}
+
+prepare_private_config() {
+    local template_path="$1"
+    local config_path="$2"
+    local agent_name="$3"
+
+    if [[ ! -e "${config_path}" ]]; then
+        (umask 077; cp "${template_path}" "${config_path}")
+        echo "Created ${agent_name} credential file: ${config_path}"
+    else
+        echo "Keeping existing ${agent_name} credential file: ${config_path}"
+    fi
+    chmod 600 "${config_path}"
 }
 
 require_python() {
@@ -194,6 +209,10 @@ setup_codex() {
     fi
     codex plugin add "${RCORE_PLUGIN_ID}"
     disable_codex_plugin_globally "${RCORE_PLUGIN_ID}"
+    prepare_private_config \
+        "${REPOSITORY_ROOT}/.codex/langfuse.example.json" \
+        "${REPOSITORY_ROOT}/.codex/langfuse.json" \
+        "Codex"
 
     echo "Codex Langfuse upload and local archive plugins installed."
     echo "Both are disabled globally and enabled by this repository."
@@ -227,6 +246,10 @@ setup_claude() {
     fi
     claude plugin install --scope user "${RCORE_PLUGIN_ID}"
     claude plugin disable --scope user "${RCORE_PLUGIN_ID}"
+    prepare_private_config \
+        "${REPOSITORY_ROOT}/.claude/settings.local.example.json" \
+        "${REPOSITORY_ROOT}/.claude/settings.local.json" \
+        "Claude Code"
 
     echo "Claude Code Langfuse upload and local archive plugins installed."
     echo "Both are disabled globally and enabled by this repository."
@@ -278,7 +301,7 @@ main() {
     cat <<'EOF'
 
 Local transcripts will be stored under .agent-sessions/ and will not be committed.
-Add the per-student Langfuse credentials before testing uploads.
+Replace the placeholders in the generated project-local credential file(s).
 Codex users must trust this repository and review its hooks with /hooks on first use.
 Claude Code users should restart Claude Code or run /reload-plugins.
 EOF

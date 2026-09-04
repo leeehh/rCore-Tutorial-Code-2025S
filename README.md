@@ -50,10 +50,18 @@ Consequently, sessions are uploaded and archived only when the agent is started
 inside this repository. The script installs the rCore marketplace from this
 repository's `origin/main`, so it remains available after switching branches.
 
-Per-student Langfuse credentials still need to be added separately. Codex users
-must trust the repository and review the Langfuse/archive hooks with `/hooks` on
-first use; hook trust is intentionally not bypassed. Claude Code users should
-restart it or run `/reload-plugins`.
+The setup script creates private, project-local credential files from the
+tracked examples. Replace the public key, secret key, server URL, and
+`student-id-name` placeholder in the file for the agent you use:
+
+- Codex: `.codex/langfuse.json`
+- Claude Code: `.claude/settings.local.json`
+
+Both files are excluded from Git; do not force-add them. Claude Code reads the
+local settings file directly, so `/plugin configure` is not required. Codex
+users must trust the repository and review the Langfuse/archive hooks with
+`/hooks` on first use; hook trust is intentionally not bypassed. Claude Code
+users should restart it or run `/reload-plugins`.
 The Codex plugin requires Node.js 22 or newer; the Claude Code plugin requires
 `uv`, or Python 3.10+ with `langfuse>=4.7,<5`. Local transcripts are stored in
 `.agent-sessions/`, which is excluded from Git.
