@@ -3,18 +3,27 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 REPOSITORY_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
-MARKETPLACE_NAME="rcore-tutorial-2025s"
-PLUGIN_ID="rcore-session-archive@${MARKETPLACE_NAME}"
+RCORE_MARKETPLACE_NAME="rcore-tutorial-2025s"
+RCORE_PLUGIN_ID="rcore-session-archive@${RCORE_MARKETPLACE_NAME}"
+CODEX_LANGFUSE_MARKETPLACE_NAME="codex-observability-plugin"
+CODEX_LANGFUSE_MARKETPLACE_SOURCE="langfuse/codex-observability-plugin"
+CODEX_LANGFUSE_PLUGIN_ID="tracing@${CODEX_LANGFUSE_MARKETPLACE_NAME}"
+CLAUDE_LANGFUSE_MARKETPLACE_NAME="langfuse-observability"
+CLAUDE_LANGFUSE_MARKETPLACE_SOURCE="langfuse/Claude-Observability-Plugin"
+CLAUDE_LANGFUSE_PLUGIN_ID="langfuse-observability@${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"
 MARKETPLACE_SOURCE=""
 
 usage() {
     cat <<'EOF'
 Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all]
 
-  auto    Configure every supported agent found on this machine (default).
-  codex   Configure Codex only.
-  claude  Configure Claude Code only.
+  auto    Install plugins for every supported agent found (default).
+  codex   Install the Codex upload and local archive plugins only.
+  claude  Install the Claude Code upload and local archive plugins only.
   all     Require and configure both Codex and Claude Code.
+
+Plugins are disabled in the user configuration and enabled by this repository's
+tracked project configuration. Langfuse credentials are configured separately.
 EOF
 }
 
@@ -23,6 +32,47 @@ require_python() {
         echo "error: Python 3 is required by the local session archive hook" >&2
         exit 1
     fi
+    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'; then
+        echo "error: Python 3.9 or newer is required" >&2
+        exit 1
+    fi
+}
+
+require_node_22() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "error: Node.js 22 or newer is required by the Langfuse Codex plugin" >&2
+        return 1
+    fi
+    if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+        echo "error: Node.js 22 or newer is required by the Langfuse Codex plugin" >&2
+        return 1
+    fi
+}
+
+require_claude_langfuse_runtime() {
+    if command -v uv >/dev/null 2>&1; then
+        return
+    fi
+    if python3 -c '
+import importlib.metadata
+import re
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit(1)
+match = re.match(r"^(\d+)\.(\d+)", importlib.metadata.version("langfuse"))
+raise SystemExit(
+    0 if match and (int(match.group(1)), int(match.group(2))) >= (4, 7)
+    and int(match.group(1)) < 5 else 1
+)
+' >/dev/null 2>&1; then
+        return
+    fi
+
+    echo "error: the Langfuse Claude Code plugin requires uv, or Python 3.10+" >&2
+    echo "       with langfuse>=4.7,<5 installed" >&2
+    echo "       see https://docs.astral.sh/uv/getting-started/installation/" >&2
+    return 1
 }
 
 resolve_marketplace_source() {
@@ -40,16 +90,18 @@ resolve_marketplace_source() {
 }
 
 codex_marketplace_exists() {
+    local marketplace_name="$1"
     codex plugin marketplace list --json | python3 -c '
 import json, sys
 name = sys.argv[1]
 data = json.load(sys.stdin)
 raise SystemExit(0 if any(item.get("name") == name for item in data.get("marketplaces", [])) else 1)
-' "${MARKETPLACE_NAME}"
+' "${marketplace_name}"
 }
 
 disable_codex_plugin_globally() {
-    python3 - "${PLUGIN_ID}" <<'PY'
+    local plugin_id="$1"
+    python3 - "${plugin_id}" <<'PY'
 import os
 import re
 import stat
@@ -105,12 +157,13 @@ PY
 }
 
 claude_marketplace_exists() {
+    local marketplace_name="$1"
     claude plugin marketplace list --json | python3 -c '
 import json, sys
 name = sys.argv[1]
 data = json.load(sys.stdin)
 raise SystemExit(0 if any(item.get("name") == name for item in data) else 1)
-' "${MARKETPLACE_NAME}"
+' "${marketplace_name}"
 }
 
 setup_codex() {
@@ -118,25 +171,32 @@ setup_codex() {
         echo "error: Codex CLI is not installed" >&2
         return 1
     fi
+    require_node_22
 
-    if codex_marketplace_exists; then
-        codex plugin marketplace upgrade "${MARKETPLACE_NAME}"
+    if codex_marketplace_exists "${CODEX_LANGFUSE_MARKETPLACE_NAME}"; then
+        if ! codex plugin marketplace upgrade "${CODEX_LANGFUSE_MARKETPLACE_NAME}"; then
+            echo "warning: could not update the Codex Langfuse marketplace; using its cache" >&2
+        fi
+    else
+        codex plugin marketplace add "${CODEX_LANGFUSE_MARKETPLACE_SOURCE}"
+    fi
+    codex plugin add "${CODEX_LANGFUSE_PLUGIN_ID}"
+    disable_codex_plugin_globally "${CODEX_LANGFUSE_PLUGIN_ID}"
+
+    if codex_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
+        if ! codex plugin marketplace upgrade "${RCORE_MARKETPLACE_NAME}"; then
+            echo "warning: could not update the rCore Codex marketplace; using its cache" >&2
+        fi
     elif [[ -d "${MARKETPLACE_SOURCE}" ]]; then
         codex plugin marketplace add "${MARKETPLACE_SOURCE}"
     else
         codex plugin marketplace add "${MARKETPLACE_SOURCE}" --ref main
     fi
-    codex plugin add "${PLUGIN_ID}"
-    disable_codex_plugin_globally
+    codex plugin add "${RCORE_PLUGIN_ID}"
+    disable_codex_plugin_globally "${RCORE_PLUGIN_ID}"
 
-    echo "Codex local session archive configured (enabled only by this repository)."
-    if ! codex plugin list --json | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-raise SystemExit(0 if any(item.get("pluginId") == "tracing@codex-observability-plugin" and item.get("installed") for item in data.get("installed", [])) else 1)
-'; then
-        echo "note: the official Langfuse Codex tracing plugin is not installed; follow the course tracing instructions."
-    fi
+    echo "Codex Langfuse upload and local archive plugins installed."
+    echo "Both are disabled globally and enabled by this repository."
 }
 
 setup_claude() {
@@ -144,24 +204,32 @@ setup_claude() {
         echo "error: Claude Code CLI is not installed" >&2
         return 1
     fi
+    require_claude_langfuse_runtime
 
-    if claude_marketplace_exists; then
-        claude plugin marketplace update "${MARKETPLACE_NAME}"
-    elif [[ -d "${MARKETPLACE_SOURCE}" ]]; then
-        claude plugin marketplace add --scope local "${MARKETPLACE_SOURCE}"
+    if claude_marketplace_exists "${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"; then
+        if ! claude plugin marketplace update "${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"; then
+            echo "warning: could not update the Claude Langfuse marketplace; using its cache" >&2
+        fi
     else
-        claude plugin marketplace add --scope local "${MARKETPLACE_SOURCE}#main"
+        claude plugin marketplace add --scope user "${CLAUDE_LANGFUSE_MARKETPLACE_SOURCE}"
     fi
-    claude plugin install --scope local "${PLUGIN_ID}"
+    claude plugin install --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
+    claude plugin disable --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
 
-    echo "Claude Code local session archive configured."
-    if ! claude plugin list --json | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-raise SystemExit(0 if any(item.get("id") == "langfuse-observability@langfuse-observability" for item in data) else 1)
-'; then
-        echo "note: the official Langfuse Claude Code plugin is not installed; follow the course tracing instructions."
+    if claude_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
+        if ! claude plugin marketplace update "${RCORE_MARKETPLACE_NAME}"; then
+            echo "warning: could not update the rCore Claude marketplace; using its cache" >&2
+        fi
+    elif [[ -d "${MARKETPLACE_SOURCE}" ]]; then
+        claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}"
+    else
+        claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}#main"
     fi
+    claude plugin install --scope user "${RCORE_PLUGIN_ID}"
+    claude plugin disable --scope user "${RCORE_PLUGIN_ID}"
+
+    echo "Claude Code Langfuse upload and local archive plugins installed."
+    echo "Both are disabled globally and enabled by this repository."
 }
 
 main() {
@@ -210,7 +278,8 @@ main() {
     cat <<'EOF'
 
 Local transcripts will be stored under .agent-sessions/ and will not be committed.
-Codex users must review and trust the new hooks with /hooks on first use.
+Add the per-student Langfuse credentials before testing uploads.
+Codex users must trust this repository and review its hooks with /hooks on first use.
 Claude Code users should restart Claude Code or run /reload-plugins.
 EOF
 }

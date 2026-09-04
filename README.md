@@ -39,14 +39,24 @@ $ make run
 ```
 Notice: $ID is from [1-9]
 
-The agent setup script installs the repository-local session archive plugin for
-Codex and/or Claude Code. Run it from the `main` branch before checking out a
-lab branch. Use `./scripts/setup-agent-plugins.sh codex` or
-`./scripts/setup-agent-plugins.sh claude` to configure only one agent. The
-script installs the marketplace from this repository's `origin/main`, so the
-installed plugin remains available after switching branches. The official
-Langfuse upload plugin and per-student credentials remain separate. Local
-transcripts are stored in `.agent-sessions/`, which is excluded from Git.
+The agent setup script installs both the official Langfuse upload plugin and the
+rCore local session archive plugin for Codex and/or Claude Code. Run it from the
+`main` branch before checking out a lab branch. Use
+`./scripts/setup-agent-plugins.sh codex` or
+`./scripts/setup-agent-plugins.sh claude` to configure only one agent. Both
+plugins are disabled in the user's global configuration and enabled by this
+repository's project configuration, including the `ch1` through `ch8` branches.
+Consequently, sessions are uploaded and archived only when the agent is started
+inside this repository. The script installs the rCore marketplace from this
+repository's `origin/main`, so it remains available after switching branches.
+
+Per-student Langfuse credentials still need to be added separately. Codex users
+must trust the repository and review the Langfuse/archive hooks with `/hooks` on
+first use; hook trust is intentionally not bypassed. Claude Code users should
+restart it or run `/reload-plugins`.
+The Codex plugin requires Node.js 22 or newer; the Claude Code plugin requires
+`uv`, or Python 3.10+ with `langfuse>=4.7,<5`. Local transcripts are stored in
+`.agent-sessions/`, which is excluded from Git.
 
 ### Grading
 
