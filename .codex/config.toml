@@ -1,7 +1,7 @@
 # The Langfuse tracing plugin is installed globally, but is enabled only for
 # Codex sessions started from this trusted repository root.
 [features]
-plugin_hooks = true
+hooks = true
 
 [plugins."tracing@codex-observability-plugin"]
 enabled = true

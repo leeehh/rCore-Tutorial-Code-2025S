@@ -28,6 +28,7 @@ os/vendor/
 # Per-student, project-local Langfuse credentials.
 .codex/langfuse.json
 .claude/settings.local.json
+rcore-agent-token*.json
 
 # Raw local coding-agent transcripts. These may contain sensitive data.
 .agent-sessions/
