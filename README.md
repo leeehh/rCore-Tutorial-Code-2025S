@@ -30,7 +30,7 @@
 # setup build&run environment first
 $ git clone https://github.com/LearningOS/rCore-Tutorial-Code-2025S.git
 $ cd rCore-Tutorial-Code-2025S
-$ ./scripts/setup-agent-plugins.sh
+$ ./scripts/setup-agent-plugins.sh auto ~/Downloads/rcore-agent-token-你的学号.json
 $ git clone https://github.com/LearningOS/rCore-Tutorial-Test-2025S.git user
 $ git checkout ch$ID
 $ cd os
@@ -50,15 +50,21 @@ Consequently, sessions are uploaded and archived only when the agent is started
 inside this repository. The script installs the rCore marketplace from this
 repository's `origin/main`, so it remains available after switching branches.
 
-The setup script creates private, project-local credential files from the
-tracked examples. Replace the public key, secret key, server URL, and
-`student-id-name` placeholder in the file for the agent you use:
+先打开
+[`https://lihh18-nuc.tail6722a8.ts.net:10000/register`](https://lihh18-nuc.tail6722a8.ts.net:10000/register)，
+填写真实姓名和学号并下载凭据 JSON；每个学号只能注册一次。把 JSON 路径作为
+脚本的第二个参数，脚本会自动生成所需的项目级配置：
 
 - Codex: `.codex/langfuse.json`
 - Claude Code: `.claude/settings.local.json`
 
-Both files are excluded from Git; do not force-add them. Claude Code reads the
-local settings file directly, so `/plugin configure` is not required. Codex
+Both files and downloaded `rcore-agent-token*.json` files are excluded from
+Git; do not force-add them. The JSON contains a secret: do not share it, and
+delete extra copies after setup. Identity is derived by the server from this
+token; no `user_id` needs to be entered. If the token is lost or the student ID
+is already registered, contact a TA to revoke it and register again.
+
+Claude Code reads the local settings file directly, so `/plugin configure` is not required. Codex
 users must trust the repository and review the Langfuse/archive hooks with
 `/hooks` on first use; hook trust is intentionally not bypassed. Claude Code
 users should restart it or run `/reload-plugins`.

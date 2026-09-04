@@ -12,10 +12,11 @@ CLAUDE_LANGFUSE_MARKETPLACE_NAME="langfuse-observability"
 CLAUDE_LANGFUSE_MARKETPLACE_SOURCE="langfuse/Claude-Observability-Plugin"
 CLAUDE_LANGFUSE_PLUGIN_ID="langfuse-observability@${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"
 MARKETPLACE_SOURCE=""
+CREDENTIAL_FILE=""
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all]
+Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all] [credential.json]
 
   auto    Install plugins for every supported agent found (default).
   codex   Install the Codex upload and local archive plugins only.
@@ -23,8 +24,10 @@ Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all]
   all     Require and configure both Codex and Claude Code.
 
 Plugins are disabled in the user configuration and enabled by this repository's
-tracked project configuration. Private credential files are created in this
-repository from tracked templates and are excluded from Git.
+tracked project configuration. Register at
+https://lihh18-nuc.tail6722a8.ts.net:10000/register, download the credential
+JSON, then pass its path as the second argument. Credentials are written only
+to this repository and are excluded from Git.
 EOF
 }
 
@@ -33,9 +36,98 @@ prepare_private_config() {
     local config_path="$2"
     local agent_name="$3"
 
-    if [[ ! -e "${config_path}" ]]; then
+    if [[ -n "${CREDENTIAL_FILE}" ]]; then
+        python3 - "${CREDENTIAL_FILE}" "${config_path}" "${agent_name}" <<'PY'
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+credential_path = Path(sys.argv[1]).expanduser().resolve()
+config_path = Path(sys.argv[2])
+agent_name = sys.argv[3]
+
+try:
+    credential = json.loads(credential_path.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit(f"error: credential JSON not found: {credential_path}")
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"error: cannot read credential JSON: {error}")
+
+student_id = credential.get("student_id")
+public_key = credential.get("public_key")
+secret_key = credential.get("secret_key")
+base_url = credential.get("base_url")
+if not isinstance(student_id, str) or not re.fullmatch(r"[0-9]{6,20}", student_id):
+    raise SystemExit("error: credential JSON contains an invalid student_id")
+if public_key != f"pk-lf-stu-{student_id}":
+    raise SystemExit("error: credential JSON public_key does not match student_id")
+if not isinstance(secret_key, str) or not secret_key.startswith("sk-lf-token-") or len(secret_key) < 32:
+    raise SystemExit("error: credential JSON contains an invalid secret_key")
+if not isinstance(base_url, str) or not re.fullmatch(r"https://[^/?#:]+:8443", base_url):
+    raise SystemExit("error: credential JSON contains an invalid gateway base_url")
+
+output = {}
+if config_path.is_file():
+    try:
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: cannot preserve existing {agent_name} config: {error}")
+    if not isinstance(existing, dict):
+        raise SystemExit(f"error: existing {agent_name} config must be a JSON object")
+    output.update(existing)
+
+if agent_name == "Codex":
+    output.update({
+        "enabled": True,
+        "public_key": public_key,
+        "secret_key": secret_key,
+        "base_url": base_url,
+        "tags": ["os-lab", "rcore"],
+    })
+    output.pop("user_id", None)
+elif agent_name == "Claude Code":
+    output.setdefault("$schema", "https://json.schemastore.org/claude-code-settings.json")
+    environment = output.setdefault("env", {})
+    if not isinstance(environment, dict):
+        raise SystemExit("error: existing Claude Code env config must be a JSON object")
+    environment.update({
+        "LANGFUSE_PUBLIC_KEY": public_key,
+        "LANGFUSE_SECRET_KEY": secret_key,
+        "LANGFUSE_BASE_URL": base_url,
+        "CC_LANGFUSE_CAPTURE_IMAGES": "false",
+    })
+    environment.pop("LANGFUSE_USER_ID", None)
+else:
+    raise SystemExit(f"error: unsupported agent: {agent_name}")
+
+config_path.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(
+    dir=config_path.parent, prefix=f".{config_path.name}.", suffix=".tmp"
+)
+temporary_path = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+        json.dump(output, destination, ensure_ascii=False, indent=2)
+        destination.write("\n")
+        destination.flush()
+        os.fsync(destination.fileno())
+    temporary_path.chmod(0o600)
+    os.replace(temporary_path, config_path)
+except BaseException:
+    try:
+        temporary_path.unlink()
+    except OSError:
+        pass
+    raise
+PY
+        echo "Configured ${agent_name} with the registered project credential: ${config_path}"
+    elif [[ ! -e "${config_path}" ]]; then
         (umask 077; cp "${template_path}" "${config_path}")
-        echo "Created ${agent_name} credential file: ${config_path}"
+        echo "warning: no credential JSON supplied; created a placeholder: ${config_path}" >&2
+        echo "         register and run this script again with the downloaded JSON" >&2
     else
         echo "Keeping existing ${agent_name} credential file: ${config_path}"
     fi
@@ -264,6 +356,12 @@ main() {
         return
     fi
 
+    CREDENTIAL_FILE="${2:-${RCORE_AGENT_CREDENTIAL_FILE:-}}"
+    if [[ -n "${CREDENTIAL_FILE}" && ! -f "${CREDENTIAL_FILE}" ]]; then
+        echo "error: credential JSON not found: ${CREDENTIAL_FILE}" >&2
+        exit 1
+    fi
+
     require_python
     resolve_marketplace_source
 
@@ -301,7 +399,7 @@ main() {
     cat <<'EOF'
 
 Local transcripts will be stored under .agent-sessions/ and will not be committed.
-Replace the placeholders in the generated project-local credential file(s).
+Credentials are stored only in this repository's ignored configuration files.
 Codex users must trust this repository and review its hooks with /hooks on first use.
 Claude Code users should restart Claude Code or run /reload-plugins.
 EOF
