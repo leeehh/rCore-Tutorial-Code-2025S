@@ -4,6 +4,7 @@
     "LANGFUSE_PUBLIC_KEY": "pk-lf-由助教提供",
     "LANGFUSE_SECRET_KEY": "sk-lf-由助教提供",
     "LANGFUSE_BASE_URL": "https://lihh18-nuc.tail6722a8.ts.net",
+    "LANGFUSE_USER_ID": "学号-姓名",
     "CC_LANGFUSE_CAPTURE_IMAGES": "false"
   }
 }
