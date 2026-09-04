@@ -25,11 +25,12 @@ os/vendor/
 
 # Keep shared code-agent configuration tracked.
 !.codex/config.toml
-!.codex/langfuse.json
+!.codex/langfuse.example.json
 !.claude/settings.json
 !.claude/settings.local.example.json
 
-# Per-machine Langfuse credentials for Claude Code.
+# Per-student, project-local Langfuse credentials.
+.codex/langfuse.json
 .claude/settings.local.json
 
 # Raw local coding-agent transcripts. These may contain sensitive data.
