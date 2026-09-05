@@ -13,21 +13,156 @@ CLAUDE_LANGFUSE_MARKETPLACE_SOURCE="langfuse/Claude-Observability-Plugin"
 CLAUDE_LANGFUSE_PLUGIN_ID="langfuse-observability@${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"
 MARKETPLACE_SOURCE=""
 CREDENTIAL_FILE=""
+ARCHIVE_MODE=""
+SECTION_NUMBER=0
+CURRENT_SECTION="启动检查"
+CURRENT_STEP="读取命令参数"
+CURRENT_COMMAND=""
+WARNING_COUNT=0
+COMPLETED_AGENTS=()
+
+UI_RESET=""
+UI_BOLD=""
+UI_DIM=""
+UI_BLUE=""
+UI_GREEN=""
+UI_YELLOW=""
+UI_RED=""
+
+init_output() {
+    # Keep redirected output readable, and respect the standard NO_COLOR opt-out.
+    if [[ -t 1 && -t 2 && "${TERM:-}" != "dumb" && -z "${NO_COLOR:-}" ]]; then
+        UI_RESET=$'\033[0m'
+        UI_BOLD=$'\033[1m'
+        UI_DIM=$'\033[2m'
+        UI_BLUE=$'\033[36m'
+        UI_GREEN=$'\033[32m'
+        UI_YELLOW=$'\033[33m'
+        UI_RED=$'\033[31m'
+    fi
+}
+
+log_info() {
+    printf '  %s[信息]%s %s\n' "${UI_BLUE}" "${UI_RESET}" "$*"
+}
+
+log_success() {
+    printf '  %s[成功]%s %s\n' "${UI_GREEN}" "${UI_RESET}" "$*"
+}
+
+log_warning() {
+    WARNING_COUNT=$((WARNING_COUNT + 1))
+    printf '  %s[警告]%s %s\n' "${UI_YELLOW}" "${UI_RESET}" "$*" >&2
+}
+
+log_error() {
+    printf '  %s[失败]%s %s\n' "${UI_RED}" "${UI_RESET}" "$*" >&2
+}
+
+log_detail() {
+    printf '         %s\n' "$*"
+}
+
+begin_section() {
+    SECTION_NUMBER=$((SECTION_NUMBER + 1))
+    CURRENT_SECTION="$1"
+    printf '\n%s[%s] %s%s\n' "${UI_BOLD}${UI_BLUE}" "${SECTION_NUMBER}" "$1" "${UI_RESET}"
+}
+
+begin_step() {
+    CURRENT_STEP="$1"
+    CURRENT_COMMAND=""
+    printf '  %s[执行]%s %s\n' "${UI_BLUE}" "${UI_RESET}" "${CURRENT_STEP}"
+}
+
+complete_step() {
+    log_success "${CURRENT_STEP}"
+}
+
+indent_output() {
+    local line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        printf '      %s│%s %s\n' "${UI_DIM}" "${UI_RESET}" "${line}"
+    done
+}
+
+run_command() {
+    local description="$1"
+    local status
+    shift
+    begin_step "${description}"
+    printf -v CURRENT_COMMAND '%q ' "$@"
+    printf '      %s$ %s%s\n' "${UI_DIM}" "${CURRENT_COMMAND% }" "${UI_RESET}"
+
+    # Only wrap external commands here. Wrapping a shell function in an `if`
+    # would disable errexit inside that function and could hide installation errors.
+    if "$@" 2>&1 | indent_output; then
+        complete_step
+    else
+        status=$?
+        return "${status}"
+    fi
+}
+
+report_exit() {
+    local status="$1"
+    if [[ "${status}" -eq 0 ]]; then
+        return
+    fi
+    printf '\n%s配置未完成%s\n' "${UI_BOLD}${UI_RED}" "${UI_RESET}" >&2
+    log_error "${CURRENT_SECTION} → ${CURRENT_STEP}（退出码：${status}）"
+    if [[ -n "${CURRENT_COMMAND}" ]]; then
+        log_detail "失败命令：${CURRENT_COMMAND% }" >&2
+    fi
+    if [[ "${#COMPLETED_AGENTS[@]}" -gt 0 ]]; then
+        log_detail "已完成：${COMPLETED_AGENTS[*]}" >&2
+    fi
+    log_detail "请查看上方错误信息，处理后重新运行配置脚本。" >&2
+}
+
+print_summary() {
+    printf '\n%s配置结果%s\n' "${UI_BOLD}" "${UI_RESET}"
+    if [[ "${WARNING_COUNT}" -gt 0 ]]; then
+        printf '  %s[注意]%s 安装步骤已完成，有 %s 条警告需要查看。\n' \
+            "${UI_YELLOW}" "${UI_RESET}" "${WARNING_COUNT}"
+    else
+        log_success "配置完成"
+    fi
+    log_detail "已配置 Agent：${COMPLETED_AGENTS[*]}"
+    log_detail "生效范围：本仓库（全局关闭）"
+    log_detail "本地留档：.agent-sessions/"
+    log_detail "留档等级：${ARCHIVE_MODE}（.agents/session-archive.json）"
+    log_detail "个人凭据：仅保存在项目配置目录，已忽略 Git 提交"
+
+    printf '\n%s接下来%s\n' "${UI_BOLD}" "${UI_RESET}"
+    local agent_name
+    for agent_name in "${COMPLETED_AGENTS[@]}"; do
+        case "${agent_name}" in
+            Codex)
+                log_info "Codex：从本仓库打开新会话；首次使用请通过 /hooks 审阅并信任 hooks。"
+                ;;
+            "Claude Code")
+                log_info "Claude Code：从本仓库重新启动，或在已有会话执行 /reload-plugins。"
+                ;;
+        esac
+    done
+}
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/setup-agent-plugins.sh [auto|codex|claude|all] [credential.json]
+用法：./scripts/setup-agent-plugins.sh [auto|codex|claude|all] [credential.json]
 
-  auto    Install plugins for every supported agent found (default).
-  codex   Install the Codex upload and local archive plugins only.
-  claude  Install the Claude Code upload and local archive plugins only.
-  all     Require and configure both Codex and Claude Code.
+  auto    配置本机已安装的 Agent（默认）
+  codex   仅配置 Codex 的上传和本地归档插件
+  claude  仅配置 Claude Code 的上传和本地归档插件
+  all     配置两者；缺少任一 Agent 时会报错
 
-Plugins are disabled in the user configuration and enabled by this repository's
-tracked project configuration. Register at
-https://lihh18-nuc.tail6722a8.ts.net:10000/register, download the credential
-JSON, then pass its path as the second argument. Credentials are written only
-to this repository and are excluded from Git.
+插件全局关闭，仅在本仓库启用。请先注册并下载个人凭据 JSON：
+  https://lihh18-nuc.tail6722a8.ts.net:10000/register
+然后将 JSON 路径作为第二个参数传入。凭据只保存到项目目录，不提交 Git。
+
+输出标记：[执行] 正在处理  [成功] 已完成  [警告] 需要留意  [失败] 已停止
+终端中自动使用颜色；重定向输出或设置 NO_COLOR=1 时使用纯文本。
 EOF
 }
 
@@ -123,24 +258,25 @@ except BaseException:
         pass
     raise
 PY
-        echo "Configured ${agent_name} with the registered project credential: ${config_path}"
+        log_info "已写入 ${agent_name} 个人凭据：${config_path}"
     elif [[ ! -e "${config_path}" ]]; then
         (umask 077; cp "${template_path}" "${config_path}")
-        echo "warning: no credential JSON supplied; created a placeholder: ${config_path}" >&2
-        echo "         register and run this script again with the downloaded JSON" >&2
+        log_warning "未提供 ${agent_name} 个人凭据，当前只有占位配置，尚不能上传会话。"
+        log_detail "配置文件：${config_path}" >&2
+        log_detail "请注册并下载凭据 JSON，再将其路径作为第二个参数重新运行脚本。" >&2
     else
-        echo "Keeping existing ${agent_name} credential file: ${config_path}"
+        log_info "保留 ${agent_name} 现有凭据：${config_path}"
     fi
     chmod 600 "${config_path}"
 }
 
 require_python() {
     if ! command -v python3 >/dev/null 2>&1; then
-        echo "error: Python 3 is required by the local session archive hook" >&2
+        log_error "未找到 Python 3；本地归档插件需要 Python 3.9 或更高版本。"
         exit 1
     fi
     if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'; then
-        echo "error: Python 3.9 or newer is required" >&2
+        log_error "Python 版本过低；请安装 Python 3.9 或更高版本。"
         exit 1
     fi
 }
@@ -151,16 +287,16 @@ prepare_archive_config() {
 
     if [[ ! -e "${config_path}" ]]; then
         (umask 077; cp "${template_path}" "${config_path}")
-        echo "Created local session archive configuration: ${config_path}"
+        log_info "已创建本地归档配置：${config_path}"
     elif [[ ! -f "${config_path}" ]]; then
-        echo "error: archive configuration is not a regular file: ${config_path}" >&2
+        log_error "归档配置不是普通文件：${config_path}"
         return 1
     else
-        echo "Keeping existing local session archive configuration: ${config_path}"
+        log_info "保留现有归档配置：${config_path}"
     fi
     chmod 600 "${config_path}"
 
-    python3 - "${config_path}" <<'PY'
+    ARCHIVE_MODE=$(python3 - "${config_path}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -178,16 +314,19 @@ if mode not in allowed_modes:
     raise SystemExit(
         f"error: archive mode must be one of {choices}; found {mode!r}"
     )
+print(mode)
 PY
+    )
+    log_info "当前本地留档等级：${ARCHIVE_MODE}"
 }
 
 require_node_22() {
     if ! command -v node >/dev/null 2>&1; then
-        echo "error: Node.js 22 or newer is required by the Langfuse Codex plugin" >&2
+        log_error "未找到 Node.js；Codex 的 Langfuse 插件需要 Node.js 22 或更高版本。"
         return 1
     fi
     if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
-        echo "error: Node.js 22 or newer is required by the Langfuse Codex plugin" >&2
+        log_error "Node.js 版本过低；Codex 的 Langfuse 插件需要 Node.js 22 或更高版本。"
         return 1
     fi
 }
@@ -212,9 +351,9 @@ raise SystemExit(
         return
     fi
 
-    echo "error: the Langfuse Claude Code plugin requires uv, or Python 3.10+" >&2
-    echo "       with langfuse>=4.7,<5 installed" >&2
-    echo "       see https://docs.astral.sh/uv/getting-started/installation/" >&2
+    log_error "Claude Code 的 Langfuse 插件缺少运行环境。"
+    log_detail "请安装 uv；或使用 Python 3.10+ 并安装 langfuse>=4.7,<5。" >&2
+    log_detail "uv 安装说明：https://docs.astral.sh/uv/getting-started/installation/" >&2
     return 1
 }
 
@@ -224,12 +363,10 @@ resolve_marketplace_source() {
         return
     fi
 
-    MARKETPLACE_SOURCE=$(git -C "${REPOSITORY_ROOT}" remote get-url origin 2>/dev/null || true)
-    if [[ -z "${MARKETPLACE_SOURCE}" ]]; then
-        echo "error: cannot determine the Git origin for the rCore plugin marketplace" >&2
-        echo "set RCORE_PLUGIN_MARKETPLACE_SOURCE to a Git URL or marketplace directory" >&2
-        exit 1
-    fi
+    # Install the archive plugin from the checkout whose setup script is being
+    # run.  This avoids a stale marketplace clone serving an older plugin after
+    # students update or switch branches in the experiment repository.
+    MARKETPLACE_SOURCE="${REPOSITORY_ROOT}"
 }
 
 codex_marketplace_exists() {
@@ -240,6 +377,42 @@ name = sys.argv[1]
 data = json.load(sys.stdin)
 raise SystemExit(0 if any(item.get("name") == name for item in data.get("marketplaces", [])) else 1)
 ' "${marketplace_name}"
+}
+
+codex_plugin_is_installed() {
+    local plugin_id="$1"
+    codex plugin list --json | python3 -c '
+import json, sys
+plugin_id = sys.argv[1]
+data = json.load(sys.stdin)
+raise SystemExit(
+    0 if any(item.get("pluginId") == plugin_id for item in data.get("installed", [])) else 1
+)
+' "${plugin_id}"
+}
+
+refresh_codex_rcore_plugin() {
+    # `marketplace upgrade` cannot repair a marketplace that was previously
+    # registered against a copied local cache. Remove both layers so Codex
+    # installs the plugin advertised by MARKETPLACE_SOURCE on every setup run.
+    if codex_plugin_is_installed "${RCORE_PLUGIN_ID}"; then
+        run_command "移除 Codex 旧版归档插件缓存" \
+            codex plugin remove "${RCORE_PLUGIN_ID}"
+    fi
+    if codex_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
+        run_command "移除 Codex 旧归档插件源" \
+            codex plugin marketplace remove "${RCORE_MARKETPLACE_NAME}"
+    fi
+
+    if [[ -d "${MARKETPLACE_SOURCE}" ]]; then
+        run_command "注册 Codex 归档插件源" \
+            codex plugin marketplace add "${MARKETPLACE_SOURCE}"
+    else
+        run_command "注册 Codex 归档插件源" \
+            codex plugin marketplace add "${MARKETPLACE_SOURCE}" --ref main
+    fi
+    run_command "安装 Codex 本地归档插件" \
+        codex plugin add "${RCORE_PLUGIN_ID}"
 }
 
 disable_codex_plugin_globally() {
@@ -309,111 +482,209 @@ raise SystemExit(0 if any(item.get("name") == name for item in data) else 1)
 ' "${marketplace_name}"
 }
 
+claude_plugin_is_installed() {
+    local plugin_id="$1"
+    claude plugin list --json | python3 -c '
+import json, sys
+plugin_id = sys.argv[1]
+data = json.load(sys.stdin)
+raise SystemExit(0 if any(item.get("id") == plugin_id for item in data) else 1)
+' "${plugin_id}"
+}
+
+claude_project_plugin_is_enabled() {
+    local plugin_id="$1"
+    python3 - "${REPOSITORY_ROOT}/.claude/settings.json" "${plugin_id}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+settings_path = Path(sys.argv[1])
+plugin_id = sys.argv[2]
+try:
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+enabled_plugins = settings.get("enabledPlugins")
+raise SystemExit(
+    0 if isinstance(enabled_plugins, dict) and enabled_plugins.get(plugin_id) is True else 1
+)
+PY
+}
+
+enable_claude_plugin_for_project() {
+    local plugin_id="$1"
+    if ! claude_project_plugin_is_enabled "${plugin_id}"; then
+        run_command "在本仓库启用 Claude Code 插件：${plugin_id}" \
+            claude plugin enable --scope project "${plugin_id}"
+    else
+        log_info "本仓库已启用 Claude Code 插件：${plugin_id}"
+    fi
+}
+
+refresh_claude_rcore_plugin() {
+    # Claude Code also caches installed plugin versions. Reinstalling after the
+    # marketplace is rebound ensures hooks come from the current checkout.
+    if claude_plugin_is_installed "${RCORE_PLUGIN_ID}"; then
+        run_command "移除 Claude Code 旧版归档插件缓存" \
+            claude plugin uninstall --scope user "${RCORE_PLUGIN_ID}"
+    fi
+    if claude_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
+        run_command "移除 Claude Code 旧归档插件源" \
+            claude plugin marketplace remove "${RCORE_MARKETPLACE_NAME}"
+    fi
+
+    if [[ -d "${MARKETPLACE_SOURCE}" ]]; then
+        run_command "注册 Claude Code 归档插件源" \
+            claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}"
+    else
+        run_command "注册 Claude Code 归档插件源" \
+            claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}#main"
+    fi
+    run_command "安装 Claude Code 本地归档插件" \
+        claude plugin install --scope user "${RCORE_PLUGIN_ID}"
+}
+
 setup_codex() {
+    begin_section "Codex"
+    begin_step "检查 Codex 运行环境"
     if ! command -v codex >/dev/null 2>&1; then
-        echo "error: Codex CLI is not installed" >&2
+        log_error "未找到 Codex CLI，请先安装后重新运行脚本。"
         return 1
     fi
     require_node_22
+    complete_step
 
     if codex_marketplace_exists "${CODEX_LANGFUSE_MARKETPLACE_NAME}"; then
-        if ! codex plugin marketplace upgrade "${CODEX_LANGFUSE_MARKETPLACE_NAME}"; then
-            echo "warning: could not update the Codex Langfuse marketplace; using its cache" >&2
+        if ! run_command "更新 Codex 的 Langfuse 插件源" \
+            codex plugin marketplace upgrade "${CODEX_LANGFUSE_MARKETPLACE_NAME}"; then
+            log_warning "Langfuse 插件源更新失败，将继续使用已有缓存；详情见上方命令输出。"
         fi
     else
-        codex plugin marketplace add "${CODEX_LANGFUSE_MARKETPLACE_SOURCE}"
+        run_command "注册 Codex 的 Langfuse 插件源" \
+            codex plugin marketplace add "${CODEX_LANGFUSE_MARKETPLACE_SOURCE}"
     fi
-    codex plugin add "${CODEX_LANGFUSE_PLUGIN_ID}"
+    run_command "安装 Codex 的 Langfuse 上传插件" \
+        codex plugin add "${CODEX_LANGFUSE_PLUGIN_ID}"
+    begin_step "在全局配置中关闭 Codex 上传插件"
     disable_codex_plugin_globally "${CODEX_LANGFUSE_PLUGIN_ID}"
+    complete_step
 
-    if codex_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
-        if ! codex plugin marketplace upgrade "${RCORE_MARKETPLACE_NAME}"; then
-            echo "warning: could not update the rCore Codex marketplace; using its cache" >&2
-        fi
-    elif [[ -d "${MARKETPLACE_SOURCE}" ]]; then
-        codex plugin marketplace add "${MARKETPLACE_SOURCE}"
-    else
-        codex plugin marketplace add "${MARKETPLACE_SOURCE}" --ref main
-    fi
-    codex plugin add "${RCORE_PLUGIN_ID}"
+    refresh_codex_rcore_plugin
+    begin_step "在全局配置中关闭 Codex 归档插件"
     disable_codex_plugin_globally "${RCORE_PLUGIN_ID}"
+    complete_step
+    begin_step "准备 Codex 项目凭据配置"
     prepare_private_config \
         "${REPOSITORY_ROOT}/.codex/langfuse.example.json" \
         "${REPOSITORY_ROOT}/.codex/langfuse.json" \
         "Codex"
+    complete_step
 
-    echo "Codex Langfuse upload and local archive plugins installed."
-    echo "Both are disabled globally and enabled by this repository."
+    COMPLETED_AGENTS+=("Codex")
+    log_success "Codex 安装步骤完成"
 }
 
 setup_claude() {
+    begin_section "Claude Code"
+    begin_step "检查 Claude Code 运行环境"
     if ! command -v claude >/dev/null 2>&1; then
-        echo "error: Claude Code CLI is not installed" >&2
+        log_error "未找到 Claude Code CLI，请先安装后重新运行脚本。"
         return 1
     fi
     require_claude_langfuse_runtime
+    complete_step
 
     if claude_marketplace_exists "${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"; then
-        if ! claude plugin marketplace update "${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"; then
-            echo "warning: could not update the Claude Langfuse marketplace; using its cache" >&2
+        if ! run_command "更新 Claude Code 的 Langfuse 插件源" \
+            claude plugin marketplace update "${CLAUDE_LANGFUSE_MARKETPLACE_NAME}"; then
+            log_warning "Langfuse 插件源更新失败，将继续使用已有缓存；详情见上方命令输出。"
         fi
     else
-        claude plugin marketplace add --scope user "${CLAUDE_LANGFUSE_MARKETPLACE_SOURCE}"
+        run_command "注册 Claude Code 的 Langfuse 插件源" \
+            claude plugin marketplace add --scope user "${CLAUDE_LANGFUSE_MARKETPLACE_SOURCE}"
     fi
-    claude plugin install --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
-    claude plugin disable --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
+    run_command "安装 Claude Code 的 Langfuse 上传插件" \
+        claude plugin install --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
+    run_command "在全局配置中关闭 Claude Code 上传插件" \
+        claude plugin disable --scope user "${CLAUDE_LANGFUSE_PLUGIN_ID}"
+    enable_claude_plugin_for_project "${CLAUDE_LANGFUSE_PLUGIN_ID}"
 
-    if claude_marketplace_exists "${RCORE_MARKETPLACE_NAME}"; then
-        if ! claude plugin marketplace update "${RCORE_MARKETPLACE_NAME}"; then
-            echo "warning: could not update the rCore Claude marketplace; using its cache" >&2
-        fi
-    elif [[ -d "${MARKETPLACE_SOURCE}" ]]; then
-        claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}"
-    else
-        claude plugin marketplace add --scope user "${MARKETPLACE_SOURCE}#main"
-    fi
-    claude plugin install --scope user "${RCORE_PLUGIN_ID}"
-    claude plugin disable --scope user "${RCORE_PLUGIN_ID}"
+    refresh_claude_rcore_plugin
+    run_command "在全局配置中关闭 Claude Code 归档插件" \
+        claude plugin disable --scope user "${RCORE_PLUGIN_ID}"
+    enable_claude_plugin_for_project "${RCORE_PLUGIN_ID}"
+    begin_step "准备 Claude Code 项目凭据配置"
     prepare_private_config \
         "${REPOSITORY_ROOT}/.claude/settings.local.example.json" \
         "${REPOSITORY_ROOT}/.claude/settings.local.json" \
         "Claude Code"
+    complete_step
 
-    echo "Claude Code Langfuse upload and local archive plugins installed."
-    echo "Both are disabled globally and enabled by this repository."
+    COMPLETED_AGENTS+=("Claude Code")
+    log_success "Claude Code 安装步骤完成"
 }
 
 main() {
     local target="${1:-auto}"
     local configured=0
 
+    init_output
     if [[ "${target}" == "-h" || "${target}" == "--help" ]]; then
         usage
         return
     fi
 
+    trap 'report_exit "$?"' EXIT
+    printf '\n%srCore · Agent 环境准备%s\n' "${UI_BOLD}" "${UI_RESET}"
+    log_detail "项目目录：${REPOSITORY_ROOT}"
+    log_detail "配置目标：${target}"
+    case "${target}" in
+        auto|codex|claude|all) ;;
+        *)
+            log_error "不支持的配置目标：${target}"
+            usage >&2
+            exit 2
+            ;;
+    esac
+
+    begin_section "基础环境与项目配置"
+    begin_step "检查个人凭据路径"
     CREDENTIAL_FILE="${2:-${RCORE_AGENT_CREDENTIAL_FILE:-}}"
     if [[ -n "${CREDENTIAL_FILE}" && ! -f "${CREDENTIAL_FILE}" ]]; then
-        echo "error: credential JSON not found: ${CREDENTIAL_FILE}" >&2
+        log_error "找不到个人凭据 JSON：${CREDENTIAL_FILE}"
         exit 1
     fi
+    if [[ -z "${CREDENTIAL_FILE}" ]]; then
+        log_info "未传入新的凭据 JSON，将使用项目配置；缺少配置时会提示补充凭据。"
+    fi
+    complete_step
 
+    begin_step "检查 Python 运行环境"
     require_python
+    complete_step
     resolve_marketplace_source
+    begin_step "准备本地归档配置"
     prepare_archive_config
+    complete_step
 
     case "${target}" in
         auto)
             if command -v codex >/dev/null 2>&1; then
                 setup_codex
                 configured=1
+            else
+                log_info "跳过 Codex：未检测到 CLI（auto 模式）。"
             fi
             if command -v claude >/dev/null 2>&1; then
                 setup_claude
                 configured=1
+            else
+                log_info "跳过 Claude Code：未检测到 CLI（auto 模式）。"
             fi
             if [[ "${configured}" -eq 0 ]]; then
-                echo "error: neither Codex nor Claude Code was found" >&2
+                CURRENT_STEP="检测可配置的 Agent"
+                log_error "未找到 Codex 或 Claude Code；请先安装至少一个 Agent。"
                 exit 1
             fi
             ;;
@@ -427,21 +698,9 @@ main() {
             setup_codex
             setup_claude
             ;;
-        *)
-            usage >&2
-            exit 2
-            ;;
     esac
 
-    cat <<'EOF'
-
-Local session archives will be stored under .agent-sessions/ and will not be committed.
-The default archive mode is messages-only; edit .agents/session-archive.json
-to select tool-calls or full mode.
-Credentials are stored only in this repository's ignored configuration files.
-Codex users must trust this repository and review its hooks with /hooks on first use.
-Claude Code users should restart Claude Code or run /reload-plugins.
-EOF
+    print_summary
 }
 
 main "$@"

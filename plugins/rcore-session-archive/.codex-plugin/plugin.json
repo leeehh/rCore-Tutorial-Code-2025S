@@ -1,6 +1,6 @@
 {
   "name": "rcore-session-archive",
-  "version": "0.2.0+codex.20260904104743",
+  "version": "0.2.0+codex.20260904163348",
   "description": "Archives privacy-filtered coding-agent transcripts inside the local rCore checkout",
   "author": {
     "name": "rCore Tutorial teaching team"
