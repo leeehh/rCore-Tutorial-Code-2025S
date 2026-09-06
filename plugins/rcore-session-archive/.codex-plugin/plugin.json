@@ -1,14 +1,14 @@
 {
   "name": "rcore-session-archive",
-  "version": "0.2.0+codex.20260904163348",
-  "description": "Archives privacy-filtered coding-agent transcripts inside the local rCore checkout",
+  "version": "0.3.1+codex.20260906082705",
+  "description": "Archives readable Markdown conversations inside the local rCore checkout",
   "author": {
     "name": "rCore Tutorial teaching team"
   },
   "interface": {
     "displayName": "rCore Session Archive",
-    "shortDescription": "Keep a configurable local archive of each agent session.",
-    "longDescription": "Archives Codex and Claude Code sessions under .agent-sessions using a repository-local privacy mode: messages only, messages plus tool calls, or the full raw transcript.",
+    "shortDescription": "Read each agent session as a local Markdown document.",
+    "longDescription": "Archives Codex and Claude Code conversations as Markdown under .agent-sessions. Choose messages only, messages plus tool calls, or full conversation text with intermediate output and tool results. No raw JSON backup is kept.",
     "developerName": "rCore Tutorial teaching team",
     "category": "Productivity",
     "capabilities": [],

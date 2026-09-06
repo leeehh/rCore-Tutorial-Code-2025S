@@ -130,8 +130,8 @@ print_summary() {
     fi
     log_detail "已配置 Agent：${COMPLETED_AGENTS[*]}"
     log_detail "生效范围：本仓库（全局关闭）"
-    log_detail "本地留档：.agent-sessions/"
-    log_detail "留档等级：${ARCHIVE_MODE}（.agents/session-archive.json）"
+    log_detail "本地留档：.agent-sessions/<agent>/<session-id>.md（不生成 JSON 备份）"
+    log_detail "留档等级：${ARCHIVE_MODE}（.codex/langfuse.json）"
     log_detail "个人凭据：仅保存在项目配置目录，已忽略 Git 提交"
 
     printf '\n%s接下来%s\n' "${UI_BOLD}" "${UI_RESET}"
@@ -259,11 +259,54 @@ except BaseException:
     raise
 PY
         log_info "已写入 ${agent_name} 个人凭据：${config_path}"
-    elif [[ ! -e "${config_path}" ]]; then
-        (umask 077; cp "${template_path}" "${config_path}")
-        log_warning "未提供 ${agent_name} 个人凭据，当前只有占位配置，尚不能上传会话。"
-        log_detail "配置文件：${config_path}" >&2
-        log_detail "请注册并下载凭据 JSON，再将其路径作为第二个参数重新运行脚本。" >&2
+    elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" ]]; then
+        local config_status
+        # A previous Claude-only setup may have created a mode-only langfuse.json.
+        # Fill missing fields from the template while preserving existing values.
+        config_status=$(python3 - "${template_path}" "${config_path}" "${agent_name}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+template_path, config_path = map(Path, sys.argv[1:3])
+try:
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    existing = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"error: cannot prepare project configuration: {error}")
+if not isinstance(existing, dict):
+    raise SystemExit("error: project configuration must be a JSON object")
+output = {**template, **existing}
+if output != existing or not config_path.exists():
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            json.dump(output, destination, ensure_ascii=False, indent=2)
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary_path, config_path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+needs_credentials = sys.argv[3] != "Codex" or not output.get("base_url") or any(
+    not output.get(key) or output[key] == template[key]
+    for key in ("public_key", "secret_key")
+)
+print("placeholder" if needs_credentials else "preserved")
+PY
+        )
+        if [[ "${config_status}" == "placeholder" ]]; then
+            log_warning "未提供 ${agent_name} 个人凭据，当前只有占位配置，尚不能上传会话。"
+            log_detail "配置文件：${config_path}" >&2
+            log_detail "请注册并下载凭据 JSON，再将其路径作为第二个参数重新运行脚本。" >&2
+        else
+            log_info "保留 ${agent_name} 现有凭据：${config_path}"
+        fi
     else
         log_info "保留 ${agent_name} 现有凭据：${config_path}"
     fi
@@ -281,43 +324,94 @@ require_python() {
     fi
 }
 
-prepare_archive_config() {
-    local template_path="${REPOSITORY_ROOT}/.agents/session-archive.example.json"
-    local config_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
-
-    if [[ ! -e "${config_path}" ]]; then
-        (umask 077; cp "${template_path}" "${config_path}")
-        log_info "已创建本地归档配置：${config_path}"
-    elif [[ ! -f "${config_path}" ]]; then
-        log_error "归档配置不是普通文件：${config_path}"
-        return 1
-    else
-        log_info "保留现有归档配置：${config_path}"
-    fi
-    chmod 600 "${config_path}"
-
-    ARCHIVE_MODE=$(python3 - "${config_path}" <<'PY'
+read_archive_config() {
+    # Read before credential setup can create langfuse.json from its template,
+    # so a legacy choice is not hidden by the template's default mode.
+    ARCHIVE_MODE=$(python3 - "${REPOSITORY_ROOT}" <<'PY'
 import json
 import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+allowed_modes = {"messages", "tool-calls", "full"}
+mode = "messages"
+for relative_path in (".codex/langfuse.json", ".agents/session-archive.json"):
+    config_path = root / relative_path
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        continue
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: cannot read archive configuration {config_path}: {error}")
+    if not isinstance(config, dict):
+        raise SystemExit(f"error: archive configuration must be a JSON object: {config_path}")
+    if "mode" not in config:
+        continue
+    mode = config["mode"]
+    if not isinstance(mode, str) or mode not in allowed_modes:
+        choices = ", ".join(sorted(allowed_modes))
+        raise SystemExit(f"error: archive mode must be one of {choices}: {config_path}")
+    break
+print(mode)
+PY
+    )
+    log_info "当前本地留档等级：${ARCHIVE_MODE}"
+}
+
+prepare_archive_config() {
+    local config_path="${REPOSITORY_ROOT}/.codex/langfuse.json"
+    local legacy_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
+    local legacy_existed=0
+    if [[ -e "${legacy_path}" || -L "${legacy_path}" ]]; then
+        legacy_existed=1
+    fi
+    python3 - "${config_path}" "${ARCHIVE_MODE}" "${legacy_path}" <<'PY'
+import json
+import os
+import sys
+import tempfile
 from pathlib import Path
 
 config_path = Path(sys.argv[1])
 try:
     config = json.loads(config_path.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as error:
-    raise SystemExit(f"error: cannot read archive configuration: {error}")
+except FileNotFoundError:
+    config = {}
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"error: cannot preserve Langfuse configuration: {error}")
+if not isinstance(config, dict):
+    raise SystemExit("error: Langfuse configuration must be a JSON object")
+config["mode"] = sys.argv[2]
+config_path.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(
+    dir=config_path.parent, prefix=f".{config_path.name}.", suffix=".tmp"
+)
+temporary_path = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+        json.dump(config, destination, ensure_ascii=False, indent=2)
+        destination.write("\n")
+        destination.flush()
+        os.fsync(destination.fileno())
+    temporary_path.chmod(0o600)
+    os.replace(temporary_path, config_path)
+except BaseException:
+    temporary_path.unlink(missing_ok=True)
+    raise
 
-allowed_modes = {"messages", "tool-calls", "full"}
-mode = config.get("mode") if isinstance(config, dict) else None
-if mode not in allowed_modes:
-    choices = ", ".join(sorted(allowed_modes))
-    raise SystemExit(
-        f"error: archive mode must be one of {choices}; found {mode!r}"
-    )
-print(mode)
+# Only remove the superseded file after the new mode and credentials were
+# atomically saved. The .agents/plugins marketplace remains in place.
+legacy_path = Path(sys.argv[3])
+try:
+    if legacy_path.exists() or legacy_path.is_symlink():
+        legacy_path.unlink()
+except OSError as error:
+    raise SystemExit(f"error: mode was saved, but cannot remove legacy configuration {legacy_path}: {error}")
 PY
-    )
-    log_info "当前本地留档等级：${ARCHIVE_MODE}"
+    log_info "本地留档等级已保存到：${config_path}"
+    if [[ "${legacy_existed}" -eq 1 ]]; then
+        log_info "旧归档配置已迁移并删除：${legacy_path}"
+    fi
 }
 
 require_node_22() {
@@ -664,8 +758,8 @@ main() {
     require_python
     complete_step
     resolve_marketplace_source
-    begin_step "准备本地归档配置"
-    prepare_archive_config
+    begin_step "读取本地归档等级"
+    read_archive_config
     complete_step
 
     case "${target}" in
@@ -700,7 +794,12 @@ main() {
             ;;
     esac
 
+    begin_step "保存统一的 Langfuse 与归档配置"
+    prepare_archive_config
+    complete_step
     print_summary
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
