@@ -2,8 +2,9 @@
 
 This repository-local plugin keeps configurable Markdown archives of Codex and
 Claude Code sessions. Their `archive_session.py` hook does not upload data. The
-companion `cursor_hook.py` handles both project-local Cursor archives and OTLP
-upload through the course identity gateway. No credentials are included in the plugin.
+companions `cursor_hook.py` and `copilot_hook.py` handle project-local Cursor and
+VS Code GitHub Copilot archives and OTLP upload through the course identity gateway.
+No credentials are included in the plugin.
 
 ## Configuration
 
@@ -76,7 +77,7 @@ In `tool-calls` mode, remember that command arguments and other tool
 inputs can themselves contain sensitive information even though outputs are
 excluded.
 
-The `Stop` hook refreshes the session file after every agent response. The
+For Codex and Claude Code, the `Stop` hook refreshes the session file after every agent response. The
 `SessionEnd` hook performs one final refresh when the session closes. Both hooks
 atomically replace the same file, so repeated hook calls do not create duplicate
 archives.
@@ -99,6 +100,7 @@ Archives are written to:
 .agent-sessions/codex/<session-id>.md
 .agent-sessions/claude-code/<session-id>.md
 .agent-sessions/cursor/<conversation-id>.md
+.agent-sessions/vscode-copilot/<session-id>.md
 ```
 
 After a successful Markdown refresh, the hook removes that same session's legacy
@@ -178,3 +180,102 @@ Tests run without a real Cursor process or course-server writes:
 ```bash
 python3 -m unittest discover -s plugins/rcore-session-archive/tests
 ```
+
+## VS Code GitHub Copilot (native project hooks)
+
+From `main`, run:
+
+```bash
+./scripts/setup-agent-plugins.sh vscode /path/to/rcore-agent-token-<student-id>.json
+```
+
+`copilot` is an alias for `vscode`. The adapter needs Git and Python 3.9+, not Node.js,
+`uv`, a Langfuse SDK or the `code` CLI. Run the Bash installer in the environment
+hosting the project; on Windows, use a WSL checkout and VS Code's WSL window.
+Use a current VS Code/GitHub Copilot with project hooks and the v1 session transcript.
+This integration targets foreground, local **Copilot Agent** chats, not inline
+completions, background/cloud agents, or Codex/Claude running inside VS Code.
+
+Setup writes only these ignored, project-local files:
+
+| Path | Purpose |
+| --- | --- |
+| `.vscode/langfuse.json` | Student public key/token, gateway URL, tags, `enabled` and `mode` |
+| `.vscode/settings.json` | `chat.useHooks: true` and the custom hook file registration |
+| `.vscode/rcore-hooks/hooks.json` | Native Copilot event handlers |
+| `.vscode/rcore-hooks/*.py` | Installed Python runtime, independent of the checked-out branch |
+
+The installer preserves unrelated settings and JSONC comments, other hook commands,
+credentials and an existing mode. Re-running it does not duplicate handlers. It
+registers `.vscode/rcore-hooks/hooks.json` under `chat.hookFilesLocations`; this is
+deliberately not a default `.github/hooks` file also discoverable by other agents.
+Templates are `.vscode/copilot-hooks.example.json` and `.vscode/langfuse.example.json`.
+After pulling an update on `main`, rerun setup to refresh this runtime; Codex, Claude
+and Cursor caches are not changed. Ignored files survive switching lab branches;
+do not remove them with `git clean -fdx`.
+
+Open and trust this repository using **Open Folder**, then start a new local Copilot
+Agent chat. Use a single-folder window, not a multi-root workspace with unrelated
+projects: the hook API does not provide Cursor's complete `workspace_roots` list.
+The adapter checks its process working directory, hook `cwd`, transcript context
+when present, and the matching session header. In Remote SSH/WSL, Python and access
+to the gateway must be available in that remote environment. Existing windows may
+need **Developer: Reload Window**. Inspect **Output → Copilot Chat Hooks** for errors.
+Workspace trust and organization policies still apply; setup does not bypass them.
+These settings use the [official native hooks interface](https://code.visualstudio.com/docs/agent-customization/hooks).
+
+This does not enable application-wide Copilot OTel or write any user-global config.
+Existing unrelated global hooks/exporters are not disabled. Check for a previously
+enabled second exporter if duplicate records appear.
+
+The adapter reads only `.vscode/langfuse.json` on each invocation. Missing/invalid
+configuration or `enabled` other than `true` disables both upload and archive. A
+missing/invalid `mode` uses `messages`; `tool-calls` and `full` work as described above.
+This is the course adapter's own config, not an official VS Code/Langfuse setting.
+It never reads or migrates `.agents/session-archive.json` or another agent's mode.
+
+Handlers are installed for `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `PreCompact` and `Stop`. SessionStart alone creates no archive/trace.
+Unlike Claude, Copilot's Stop payload has no final reply; the adapter reads only the
+provided `transcript_path`, verifies its v1 header and session ID, and briefly retries
+an incomplete flush. PostToolUse can supply a tool result before the transcript flush.
+An unfinished Stop, unsupported version or corrupt source produces a warning while
+preserving the existing archive; the hook returns `{}` with exit code zero and never
+changes permission decisions. A killed process with no later hook cannot guarantee
+recovery of the final unflushed reply. See the [hook input reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference)
+and [official transcript types](https://github.com/microsoft/vscode/blob/main/extensions/copilot/src/platform/chat/common/sessionTranscriptService.ts).
+The transcript is a preview implementation detail, **not a stable hook API**.
+
+Each source user-message ordinal identifies one turn, irrespective of the number of
+LLM iterations. Only the latest, previously unobserved turn is enrolled; earlier
+unobserved history is not bulk imported when enabling the integration. Previously
+enrolled turns can refresh. IDs are deterministic across repeated callbacks and source
+UUID regeneration; changed user-message order is rejected instead of overwriting an
+unrelated turn. Historical source replay may omit tool results; already archived
+completed tools are not downgraded by pending replay entries. This follows the
+[official transcript writer and history replay](https://github.com/microsoft/vscode/blob/main/extensions/copilot/src/extension/chat/vscode-node/sessionTranscriptService.ts).
+
+Local bodies exist only in `.agent-sessions/vscode-copilot/<session-id>.md`. The adjacent
+`.state/<session-id>.sqlite3` contains only ordering/identity/timestamp/hash and delivery
+metadata, never messages, tool contents or credentials. Keep the index with the Markdown;
+an existing archive is not overwritten when its index is missing. Modes filter before
+disk writes, including during upload outages. Lowering the mode prunes disallowed
+content at the active session's next hook; raising it can recover available source
+content for enrolled turns, unlike Cursor's event-only adapter. Ended archives are not
+rewritten automatically. Files are owner-only and atomically replaced; use `tail -F`.
+The source transcript is never modified and no raw JSON/JSONL backup is made.
+
+Uploads use the same student-authenticated Langfuse OTLP endpoint as Cursor, with a
+`vscode-copilot` session namespace and one stable trace per user turn. The gateway
+assigns the identity; client `user_id` values are not forwarded. Available intermediate
+model text, reasoning summaries and tool inputs/results are uploaded independently
+of local mode; unavailable model inputs/system prompts and hidden internals are not
+invented. Terminal spans use `Bash` for the collector allowlist, retaining the actual
+tool name in metadata and Markdown. Local Markdown is saved before network I/O.
+Failed exports retry from the original source at a later hook, with no raw disk queue;
+if Copilot removes that source or there are no later hooks, backfill is not guaranteed.
+
+The shared unittest command above uses isolated synthetic transcripts and mocked
+uploads. Before classroom use, also run a harmless Copilot chat with a tool call and
+final answer, then check both the Markdown and Langfuse. A real editor-to-server test
+is separate from the adapter's automated tests.

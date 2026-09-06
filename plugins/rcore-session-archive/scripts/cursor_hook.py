@@ -69,24 +69,26 @@ def private_directory(path):
     path.chmod(0o700)
 
 
-def read_blocks(path):
+def read_blocks(path, agent_label="Cursor", marker="rcore-cursor"):
     if path.is_symlink():
         raise ValueError("refusing a symlink archive")
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    blocks = dict(BLOCK.findall(text))
-    if text.strip() and not blocks and not (text.startswith("# Cursor 会话\n") and "<!-- rcore-cursor:" not in text):
+    pattern = BLOCK if marker == "rcore-cursor" else re.compile(
+        rf"<!-- {re.escape(marker)}:([0-9a-f]{{64}}) -->\n(.*?)<!-- /{re.escape(marker)} -->\n", re.DOTALL)
+    blocks = dict(pattern.findall(text))
+    if text.strip() and not blocks and not (text.startswith(f"# {agent_label} 会话\n") and f"<!-- {marker}:" not in text):
         raise ValueError("existing Cursor archive is not a managed Markdown file")
     return blocks
 
 
-def put_block(blocks, key, events, names=None):
+def put_block(blocks, key, events, names=None, agent_label="Cursor", marker="rcore-cursor"):
     names = {} if names is None else names
-    text = "".join(event_markdown(event, "Cursor", names) for event in events)
+    text = "".join(event_markdown(event, agent_label, names) for event in events)
     # User/tool text must not be able to forge our invisible record boundaries.
-    text = text.replace("<!-- rcore-cursor:", "&lt;!-- rcore-cursor:")
-    text = text.replace("<!-- /rcore-cursor", "&lt;!-- /rcore-cursor")
+    text = text.replace(f"<!-- {marker}:", f"&lt;!-- {marker}:")
+    text = text.replace(f"<!-- /{marker}", f"&lt;!-- /{marker}")
     if text.strip():
         blocks[key] = text
 
@@ -152,8 +154,8 @@ def event_row(db, turn, key, kind, fingerprint, now, duration=0):
     return db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()
 
 
-def write_markdown(path, db, blocks, mode, session_id):
-    chunks = [f"# Cursor 会话\n\n会话 ID：{session_id}\n\n本地留档等级：`{mode}`\n\n"]
+def write_markdown(path, db, blocks, mode, session_id, agent_label="Cursor", marker="rcore-cursor"):
+    chunks = [f"# {agent_label} 会话\n\n会话 ID：{session_id}\n\n本地留档等级：`{mode}`\n\n"]
     for turn in db.execute("SELECT * FROM turns ORDER BY ordinal"):
         rendered = []
         for row in db.execute("SELECT * FROM events WHERE turn_id=? ORDER BY ordinal", (turn["id"],)):
@@ -163,7 +165,7 @@ def write_markdown(path, db, blocks, mode, session_id):
                 blocks.pop(key, None)
             body = blocks.get(key)
             if body:
-                rendered.append(f"<!-- rcore-cursor:{key} -->\n{body}<!-- /rcore-cursor -->\n\n")
+                rendered.append(f"<!-- {marker}:{key} -->\n{body}<!-- /{marker} -->\n\n")
         if rendered:
             started = datetime.fromtimestamp(turn["started"] / 1_000_000_000, timezone.utc).isoformat(sep=" ", timespec="seconds")
             chunks.append(f"## 第 {turn['ordinal']} 轮\n\n时间：{started}\n\n" + "".join(rendered))
@@ -181,17 +183,18 @@ def attribute(key, value):
     return {"key": key, "value": encoded}
 
 
-def make_span(config, payload, turn, row, name, kind, input_text=None, output_text=None, error="", root=False):
+def make_span(config, payload, turn, row, name, kind, input_text=None, output_text=None, error="", root=False,
+              agent_name="cursor", agent_label="Cursor"):
     # Namespace IDs by credential identity, agent, conversation and generation.
     # Retrying the same event never allocates a fresh trace or observation ID.
-    trace_id = digest("cursor", config.get("public_key"), payload["conversation_id"], payload["generation_id"])[:32]
+    trace_id = digest(agent_name, config.get("public_key"), payload["conversation_id"], payload["generation_id"])[:32]
     root_id = digest(trace_id, "root")[:16]
     values = {
-        "langfuse.session.id": "cursor-" + digest(config.get("public_key"), payload["conversation_id"])[:32],
-        "langfuse.trace.name": "Cursor Turn",
-        "langfuse.trace.tags": list(dict.fromkeys(["rcore", "cursor"] + config.get("tags", []))),
+        "langfuse.session.id": agent_name + "-" + digest(config.get("public_key"), payload["conversation_id"])[:32],
+        "langfuse.trace.name": f"{agent_label} Turn",
+        "langfuse.trace.tags": list(dict.fromkeys(["rcore", agent_name] + config.get("tags", []))),
         "langfuse.observation.type": kind,
-        "langfuse.observation.metadata.agent": "cursor",
+        "langfuse.observation.metadata.agent": agent_name,
     }
     model = payload.get("model_id") or payload.get("model")
     if model and kind == "generation":
@@ -204,7 +207,7 @@ def make_span(config, payload, turn, row, name, kind, input_text=None, output_te
         values["langfuse.observation.level"] = "ERROR"
         values["langfuse.observation.status_message"] = error
     if kind == "tool":
-        values["langfuse.observation.metadata.cursor_tool"] = payload.get("tool_name", name)
+        values[f"langfuse.observation.metadata.{agent_name}_tool"] = payload.get("tool_name", name)
     span = {
         "traceId": trace_id, "spanId": root_id if root else row["id"][:16],
         "name": name, "kind": 1,
@@ -236,10 +239,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # Never forward a student token to a redirected host.
 
 
-def upload(config, spans):
+def upload(config, spans, agent_name="cursor"):
     envelope = {"resourceSpans": [{
-        "resource": {"attributes": [attribute("service.name", "rcore-cursor")]},
-        "scopeSpans": [{"scope": {"name": "rcore.cursor-hooks"}, "spans": spans}],
+        "resource": {"attributes": [attribute("service.name", f"rcore-{agent_name}")]},
+        "scopeSpans": [{"scope": {"name": f"rcore.{agent_name}-hooks"}, "spans": spans}],
     }]}
     authorization = base64.b64encode(f"{config['public_key']}:{config['secret_key']}".encode()).decode()
     request = urllib.request.Request(
@@ -269,7 +272,11 @@ def upload(config, spans):
         except (OSError, ValueError, urllib.error.URLError) as error:
             failure = type(error).__name__
     # No response body, credential, raw payload or URL is printed in error logs.
-    warn(f"上传失败（{failure}），本地留档不受影响；本次事件未排入磁盘补传队列。")
+    message = f"上传失败（{failure}），本地留档不受影响；本次事件未排入磁盘补传队列。"
+    if agent_name == "cursor":
+        warn(message)
+    else:
+        print(f"[rCore {agent_name}] {message}", file=sys.stderr)
     return False
 
 

@@ -5,6 +5,8 @@
 !.claude/settings.local.example.json
 !.cursor/hooks.example.json
 !.cursor/langfuse.example.json
+!.vscode/langfuse.example.json
+!.vscode/copilot-hooks.example.json
 
 # Per-student, project-local Langfuse credentials and per-agent archive modes.
 .codex/langfuse.json
@@ -12,6 +14,9 @@
 .cursor/langfuse.json
 .cursor/hooks.json
 .cursor/rcore-hooks/
+.vscode/langfuse.json
+.vscode/settings.json
+.vscode/rcore-hooks/
 rcore-agent-token*.json
 
 # Ignore the retired policy until setup migrates and removes it.

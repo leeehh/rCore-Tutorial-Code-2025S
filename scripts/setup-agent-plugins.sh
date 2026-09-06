@@ -17,6 +17,7 @@ ARCHIVE_MODE=""
 CODEX_ARCHIVE_MODE=""
 CLAUDE_ARCHIVE_MODE=""
 CURSOR_ARCHIVE_MODE=""
+VSCODE_ARCHIVE_MODE=""
 SECTION_NUMBER=0
 CURRENT_SECTION="启动检查"
 CURRENT_STEP="读取命令参数"
@@ -143,6 +144,9 @@ print_summary() {
     if [[ -n "${CURSOR_ARCHIVE_MODE}" ]]; then
         log_detail "Cursor 留档等级：${CURSOR_ARCHIVE_MODE}（.cursor/langfuse.json → mode）"
     fi
+    if [[ -n "${VSCODE_ARCHIVE_MODE}" ]]; then
+        log_detail "VS Code Copilot 留档等级：${VSCODE_ARCHIVE_MODE}（.vscode/langfuse.json → mode）"
+    fi
     log_detail "个人凭据：仅保存在项目配置目录，已忽略 Git 提交"
 
     printf '\n%s接下来%s\n' "${UI_BOLD}" "${UI_RESET}"
@@ -158,23 +162,28 @@ print_summary() {
             Cursor)
                 log_info "Cursor：打开并信任本仓库文件夹，再新建 Agent 会话；在 Output → Hooks 查看异常。"
                 ;;
+            "VS Code Copilot")
+                log_info "VS Code：单独打开并信任本仓库文件夹，新建 Copilot Agent 会话；在 Output → Copilot Chat Hooks 查看异常。"
+                ;;
         esac
     done
 }
 
 usage() {
     cat <<'EOF'
-用法：./scripts/setup-agent-plugins.sh [auto|codex|claude|cursor|all] [credential.json]
+用法：./scripts/setup-agent-plugins.sh [auto|codex|claude|cursor|vscode|all] [credential.json]
 
   auto    配置本机已安装的 Agent（默认）
   codex   仅配置 Codex 的上传和本地归档插件
   claude  仅配置 Claude Code 的上传和本地归档插件
   cursor  仅配置 Cursor 项目 hooks；无需 Cursor 命令行、Node.js 或 uv
-  all     配置三者；Codex / Claude Code CLI 缺失时会报错
+  vscode  配置 VS Code GitHub Copilot 项目 hooks（也可使用 copilot 别名）
+  all     配置四者；Codex / Claude Code CLI 缺失时会报错
 
-auto 通过 CLI 检测 Agent；只安装 Cursor 图形界面时，请显式使用 cursor。
+auto 通过 CLI 检测 Agent；只有图形界面时，请显式使用 cursor 或 vscode。
 
-插件全局关闭，仅在本仓库启用。请先注册并下载个人凭据 JSON：
+Codex/Claude 插件全局关闭、项目启用；Cursor/VS Code 仅添加项目 hooks。
+请先注册并下载个人凭据 JSON：
   https://lihh18-nuc.tail6722a8.ts.net:10000/register
 然后将 JSON 路径作为第二个参数传入。凭据只保存到项目目录，不提交 Git。
 
@@ -231,7 +240,7 @@ if config_path.is_file():
         raise SystemExit(f"error: existing {agent_name} config must be a JSON object")
     output.update(existing)
 
-if agent_name in {"Codex", "Cursor"}:
+if agent_name in {"Codex", "Cursor", "VS Code Copilot"}:
     output.update({
         "enabled": True,
         "public_key": public_key,
@@ -276,7 +285,7 @@ except BaseException:
     raise
 PY
         log_info "已写入 ${agent_name} 个人凭据：${config_path}"
-    elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" || "${agent_name}" == "Cursor" ]]; then
+    elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" || "${agent_name}" == "Cursor" || "${agent_name}" == "VS Code Copilot" ]]; then
         local config_status
         # Older Claude-only setups may have created a mode-only Codex config.
         # Fill missing fields from the template while preserving existing values.
@@ -310,7 +319,7 @@ if output != existing or not config_path.exists():
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
-needs_credentials = sys.argv[3] not in {"Codex", "Cursor"} or not output.get("base_url") or any(
+needs_credentials = sys.argv[3] not in {"Codex", "Cursor", "VS Code Copilot"} or not output.get("base_url") or any(
     not output.get(key) or output[key] == template[key]
     for key in ("public_key", "secret_key")
 )
@@ -359,6 +368,8 @@ if agent_name == "claude":
     paths.insert(0, ".claude/settings.local.json")
 elif agent_name == "cursor":
     paths = [".cursor/langfuse.json"]
+elif agent_name == "vscode":
+    paths = [".vscode/langfuse.json"]
 elif agent_name != "codex":
     raise SystemExit(f"error: unsupported agent: {agent_name}")
 for relative_path in paths:
@@ -397,11 +408,12 @@ prepare_archive_config() {
         codex) ;;
         claude) config_path="${REPOSITORY_ROOT}/.claude/settings.local.json" ;;
         cursor) config_path="${REPOSITORY_ROOT}/.cursor/langfuse.json" ;;
+        vscode) config_path="${REPOSITORY_ROOT}/.vscode/langfuse.json" ;;
         *) log_error "不支持的配置目标：${agent_name}"; return 1 ;;
     esac
     local legacy_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
-    # Cursor has never used the retired shared policy. Leave it for Codex/Claude migration.
-    if [[ "${agent_name}" == "cursor" ]]; then
+    # Cursor/Copilot never used the retired shared policy. Leave it for Codex/Claude migration.
+    if [[ "${agent_name}" == "cursor" || "${agent_name}" == "vscode" ]]; then
         legacy_path=""
     fi
     local legacy_existed=0
@@ -461,6 +473,8 @@ PY
         CLAUDE_ARCHIVE_MODE="${ARCHIVE_MODE}"
     elif [[ "${agent_name}" == "cursor" ]]; then
         CURSOR_ARCHIVE_MODE="${ARCHIVE_MODE}"
+    elif [[ "${agent_name}" == "vscode" ]]; then
+        VSCODE_ARCHIVE_MODE="${ARCHIVE_MODE}"
     else
         CODEX_ARCHIVE_MODE="${ARCHIVE_MODE}"
     fi
@@ -812,8 +826,40 @@ setup_cursor() {
     log_success "Cursor 配置完成"
 }
 
+setup_vscode() {
+    begin_section "VS Code GitHub Copilot"
+    begin_step "检查 VS Code 项目配置目录"
+    local vscode_path
+    for vscode_path in ".vscode" ".vscode/langfuse.json" ".vscode/settings.json" ".vscode/rcore-hooks"; do
+        if [[ -L "${REPOSITORY_ROOT}/${vscode_path}" ]]; then
+            log_error "${vscode_path} 是符号链接；请使用项目内的普通目录或文件。"
+            return 1
+        fi
+    done
+    complete_step
+    begin_step "读取 VS Code Copilot 本地归档等级"
+    read_archive_config vscode
+    complete_step
+    log_info "配置 VS Code 项目 hooks，不启动编辑器、不写入全局配置、不启用应用级 OTel。"
+    run_command "安装 Copilot 项目 hooks（保留已有 JSONC 配置和注释）" \
+        python3 "${SCRIPT_DIR}/../plugins/rcore-session-archive/scripts/copilot_hook.py" \
+        --install "${REPOSITORY_ROOT}"
+    begin_step "准备 VS Code Copilot 项目凭据配置"
+    prepare_private_config \
+        "${REPOSITORY_ROOT}/.vscode/langfuse.example.json" \
+        "${REPOSITORY_ROOT}/.vscode/langfuse.json" \
+        "VS Code Copilot"
+    prepare_archive_config vscode
+    complete_step
+    COMPLETED_AGENTS+=("VS Code Copilot")
+    log_success "VS Code Copilot 配置完成"
+}
+
 main() {
     local target="${1:-auto}"
+    if [[ "${target}" == "copilot" ]]; then
+        target="vscode"
+    fi
     local configured=0
 
     init_output
@@ -827,7 +873,7 @@ main() {
     log_detail "项目目录：${REPOSITORY_ROOT}"
     log_detail "配置目标：${target}"
     case "${target}" in
-        auto|codex|claude|cursor|all) ;;
+        auto|codex|claude|cursor|vscode|all) ;;
         *)
             log_error "不支持的配置目标：${target}"
             usage >&2
@@ -872,9 +918,15 @@ main() {
             else
                 log_info "跳过 Cursor：未检测到 CLI；仅安装图形界面时请使用 cursor 配置目标。"
             fi
+            if command -v code >/dev/null 2>&1 || command -v code-insiders >/dev/null 2>&1; then
+                setup_vscode
+                configured=1
+            else
+                log_info "跳过 VS Code：未检测到 CLI；仅安装图形界面时请使用 vscode 配置目标。"
+            fi
             if [[ "${configured}" -eq 0 ]]; then
                 CURRENT_STEP="检测可配置的 Agent"
-                log_error "未找到 Agent CLI；请先安装 Agent。Cursor 图形界面用户可改用 cursor 配置目标。"
+                log_error "未找到 Agent CLI；请先安装 Agent。图形界面用户可改用 cursor 或 vscode 配置目标。"
                 exit 1
             fi
             ;;
@@ -887,10 +939,14 @@ main() {
         cursor)
             setup_cursor
             ;;
+        vscode)
+            setup_vscode
+            ;;
         all)
             setup_codex
             setup_claude
             setup_cursor
+            setup_vscode
             ;;
     esac
 
