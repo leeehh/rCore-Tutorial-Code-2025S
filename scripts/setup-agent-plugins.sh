@@ -14,6 +14,8 @@ CLAUDE_LANGFUSE_PLUGIN_ID="langfuse-observability@${CLAUDE_LANGFUSE_MARKETPLACE_
 MARKETPLACE_SOURCE=""
 CREDENTIAL_FILE=""
 ARCHIVE_MODE=""
+CODEX_ARCHIVE_MODE=""
+CLAUDE_ARCHIVE_MODE=""
 SECTION_NUMBER=0
 CURRENT_SECTION="启动检查"
 CURRENT_STEP="读取命令参数"
@@ -131,7 +133,12 @@ print_summary() {
     log_detail "已配置 Agent：${COMPLETED_AGENTS[*]}"
     log_detail "生效范围：本仓库（全局关闭）"
     log_detail "本地留档：.agent-sessions/<agent>/<session-id>.md（不生成 JSON 备份）"
-    log_detail "留档等级：${ARCHIVE_MODE}（.codex/langfuse.json）"
+    if [[ -n "${CODEX_ARCHIVE_MODE}" ]]; then
+        log_detail "Codex 留档等级：${CODEX_ARCHIVE_MODE}（.codex/langfuse.json → mode）"
+    fi
+    if [[ -n "${CLAUDE_ARCHIVE_MODE}" ]]; then
+        log_detail "Claude Code 留档等级：${CLAUDE_ARCHIVE_MODE}（.claude/settings.local.json → env.RCORE_SESSION_ARCHIVE_MODE）"
+    fi
     log_detail "个人凭据：仅保存在项目配置目录，已忽略 Git 提交"
 
     printf '\n%s接下来%s\n' "${UI_BOLD}" "${UI_RESET}"
@@ -261,7 +268,7 @@ PY
         log_info "已写入 ${agent_name} 个人凭据：${config_path}"
     elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" ]]; then
         local config_status
-        # A previous Claude-only setup may have created a mode-only langfuse.json.
+        # Older Claude-only setups may have created a mode-only Codex config.
         # Fill missing fields from the template while preserving existing values.
         config_status=$(python3 - "${template_path}" "${config_path}" "${agent_name}" <<'PY'
 import json
@@ -325,17 +332,24 @@ require_python() {
 }
 
 read_archive_config() {
-    # Read before credential setup can create langfuse.json from its template,
-    # so a legacy choice is not hidden by the template's default mode.
-    ARCHIVE_MODE=$(python3 - "${REPOSITORY_ROOT}" <<'PY'
+    local agent_name="${1:-codex}"
+    # Read before credential setup fills template defaults. Claude migrates the
+    # previously shared Codex mode only until its own project mode is saved.
+    ARCHIVE_MODE=$(python3 - "${REPOSITORY_ROOT}" "${agent_name}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+agent_name = sys.argv[2]
 allowed_modes = {"messages", "tool-calls", "full"}
 mode = "messages"
-for relative_path in (".codex/langfuse.json", ".agents/session-archive.json"):
+paths = [".codex/langfuse.json", ".agents/session-archive.json"]
+if agent_name == "claude":
+    paths.insert(0, ".claude/settings.local.json")
+elif agent_name != "codex":
+    raise SystemExit(f"error: unsupported agent: {agent_name}")
+for relative_path in paths:
     config_path = root / relative_path
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -345,9 +359,15 @@ for relative_path in (".codex/langfuse.json", ".agents/session-archive.json"):
         raise SystemExit(f"error: cannot read archive configuration {config_path}: {error}")
     if not isinstance(config, dict):
         raise SystemExit(f"error: archive configuration must be a JSON object: {config_path}")
-    if "mode" not in config:
+    mode_key = "mode"
+    if relative_path == ".claude/settings.local.json":
+        config = config.get("env", {})
+        if not isinstance(config, dict):
+            raise SystemExit(f"error: Claude Code env config must be a JSON object: {config_path}")
+        mode_key = "RCORE_SESSION_ARCHIVE_MODE"
+    if mode_key not in config:
         continue
-    mode = config["mode"]
+    mode = config[mode_key]
     if not isinstance(mode, str) or mode not in allowed_modes:
         choices = ", ".join(sorted(allowed_modes))
         raise SystemExit(f"error: archive mode must be one of {choices}: {config_path}")
@@ -355,17 +375,23 @@ for relative_path in (".codex/langfuse.json", ".agents/session-archive.json"):
 print(mode)
 PY
     )
-    log_info "当前本地留档等级：${ARCHIVE_MODE}"
+    log_info "${agent_name} 当前本地留档等级：${ARCHIVE_MODE}"
 }
 
 prepare_archive_config() {
+    local agent_name="${1:-codex}"
     local config_path="${REPOSITORY_ROOT}/.codex/langfuse.json"
+    case "${agent_name}" in
+        codex) ;;
+        claude) config_path="${REPOSITORY_ROOT}/.claude/settings.local.json" ;;
+        *) log_error "不支持的配置目标：${agent_name}"; return 1 ;;
+    esac
     local legacy_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
     local legacy_existed=0
     if [[ -e "${legacy_path}" || -L "${legacy_path}" ]]; then
         legacy_existed=1
     fi
-    python3 - "${config_path}" "${ARCHIVE_MODE}" "${legacy_path}" <<'PY'
+    python3 - "${config_path}" "${ARCHIVE_MODE}" "${legacy_path}" "${agent_name}" <<'PY'
 import json
 import os
 import sys
@@ -381,7 +407,13 @@ except (OSError, UnicodeError, json.JSONDecodeError) as error:
     raise SystemExit(f"error: cannot preserve Langfuse configuration: {error}")
 if not isinstance(config, dict):
     raise SystemExit("error: Langfuse configuration must be a JSON object")
-config["mode"] = sys.argv[2]
+if sys.argv[4] == "claude":
+    environment = config.setdefault("env", {})
+    if not isinstance(environment, dict):
+        raise SystemExit("error: Claude Code env config must be a JSON object")
+    environment["RCORE_SESSION_ARCHIVE_MODE"] = sys.argv[2]
+else:
+    config["mode"] = sys.argv[2]
 config_path.parent.mkdir(parents=True, exist_ok=True)
 descriptor, temporary_name = tempfile.mkstemp(
     dir=config_path.parent, prefix=f".{config_path.name}.", suffix=".tmp"
@@ -408,6 +440,11 @@ try:
 except OSError as error:
     raise SystemExit(f"error: mode was saved, but cannot remove legacy configuration {legacy_path}: {error}")
 PY
+    if [[ "${agent_name}" == "claude" ]]; then
+        CLAUDE_ARCHIVE_MODE="${ARCHIVE_MODE}"
+    else
+        CODEX_ARCHIVE_MODE="${ARCHIVE_MODE}"
+    fi
     log_info "本地留档等级已保存到：${config_path}"
     if [[ "${legacy_existed}" -eq 1 ]]; then
         log_info "旧归档配置已迁移并删除：${legacy_path}"
@@ -641,6 +678,9 @@ refresh_claude_rcore_plugin() {
 
 setup_codex() {
     begin_section "Codex"
+    begin_step "读取 Codex 本地归档等级"
+    read_archive_config codex
+    complete_step
     begin_step "检查 Codex 运行环境"
     if ! command -v codex >/dev/null 2>&1; then
         log_error "未找到 Codex CLI，请先安装后重新运行脚本。"
@@ -673,6 +713,7 @@ setup_codex() {
         "${REPOSITORY_ROOT}/.codex/langfuse.example.json" \
         "${REPOSITORY_ROOT}/.codex/langfuse.json" \
         "Codex"
+    prepare_archive_config codex
     complete_step
 
     COMPLETED_AGENTS+=("Codex")
@@ -681,6 +722,9 @@ setup_codex() {
 
 setup_claude() {
     begin_section "Claude Code"
+    begin_step "读取 Claude Code 本地归档等级"
+    read_archive_config claude
+    complete_step
     begin_step "检查 Claude Code 运行环境"
     if ! command -v claude >/dev/null 2>&1; then
         log_error "未找到 Claude Code CLI，请先安装后重新运行脚本。"
@@ -713,6 +757,7 @@ setup_claude() {
         "${REPOSITORY_ROOT}/.claude/settings.local.example.json" \
         "${REPOSITORY_ROOT}/.claude/settings.local.json" \
         "Claude Code"
+    prepare_archive_config claude
     complete_step
 
     COMPLETED_AGENTS+=("Claude Code")
@@ -758,9 +803,6 @@ main() {
     require_python
     complete_step
     resolve_marketplace_source
-    begin_step "读取本地归档等级"
-    read_archive_config
-    complete_step
 
     case "${target}" in
         auto)
@@ -794,9 +836,6 @@ main() {
             ;;
     esac
 
-    begin_step "保存统一的 Langfuse 与归档配置"
-    prepare_archive_config
-    complete_step
     print_summary
 }
 

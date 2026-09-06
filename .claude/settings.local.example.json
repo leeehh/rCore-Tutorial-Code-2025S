@@ -1,6 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
+    "RCORE_SESSION_ARCHIVE_MODE": "messages",
     "LANGFUSE_PUBLIC_KEY": "pk-lf-stu-你的学号",
     "LANGFUSE_SECRET_KEY": "sk-lf-token-注册页面生成",
     "LANGFUSE_BASE_URL": "https://lihh18-nuc.tail6722a8.ts.net:8443",

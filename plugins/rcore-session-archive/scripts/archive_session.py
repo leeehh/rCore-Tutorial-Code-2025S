@@ -18,7 +18,11 @@ from typing import Any, Dict, Iterator, Optional
 
 
 ARCHIVE_DIR_NAME = ".agent-sessions"
-CONFIG_RELATIVE_PATH = Path(".codex") / "langfuse.json"
+CONFIG_RELATIVE_PATHS = {
+    "codex": Path(".codex") / "langfuse.json",
+    "claude-code": Path(".claude") / "settings.local.json",
+}
+CLAUDE_MODE_ENV = "RCORE_SESSION_ARCHIVE_MODE"
 MODE_MESSAGES = "messages"
 MODE_TOOL_CALLS = "tool-calls"
 MODE_FULL = "full"
@@ -74,9 +78,9 @@ def safe_session_id(value: Any) -> Optional[str]:
     return normalized[:160] or None
 
 
-def read_archive_mode(repository_root: Path) -> str:
-    """Read only the shared Langfuse mode; setup handles legacy migration."""
-    config_path = repository_root / CONFIG_RELATIVE_PATH
+def read_archive_mode(repository_root: Path, agent_name: str = "codex") -> str:
+    """Read this agent's project policy; setup alone handles legacy migration."""
+    config_path = repository_root / CONFIG_RELATIVE_PATHS[agent_name]
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -89,7 +93,14 @@ def read_archive_mode(repository_root: Path) -> str:
         )
         return MODE_MESSAGES
 
-    mode = config.get("mode", MODE_MESSAGES) if isinstance(config, dict) else None
+    if agent_name == "claude-code":
+        environment = config.get("env", {}) if isinstance(config, dict) else None
+        mode = (
+            environment.get(CLAUDE_MODE_ENV, MODE_MESSAGES)
+            if isinstance(environment, dict) else None
+        )
+    else:
+        mode = config.get("mode", MODE_MESSAGES) if isinstance(config, dict) else None
     if not isinstance(mode, str) or mode not in SUPPORTED_MODES:
         print(
             f"rcore-session-archive: unsupported archive mode {mode!r}; "
@@ -303,7 +314,9 @@ def filter_claude_record(
                 )
 
 
-def read_jsonl_records(transcript_path: Path) -> Iterator[Dict[str, Any]]:
+def read_jsonl_records(
+    transcript_path: Path, allow_incomplete_tail: bool = False
+) -> Iterator[Dict[str, Any]]:
     """Read a JSONL transcript one record at a time."""
     with transcript_path.open("rb") as input_file:
         for line_number, raw_line in enumerate(input_file, start=1):
@@ -312,6 +325,11 @@ def read_jsonl_records(transcript_path: Path) -> Iterator[Dict[str, Any]]:
             try:
                 record = json.loads(raw_line)
             except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                # During Stop, Claude may still be appending the final JSONL
+                # record. Its input text covers that reply until the next refresh.
+                # Never conceal a malformed complete line or a mid-file error.
+                if allow_incomplete_tail and not raw_line.endswith(b"\n"):
+                    return
                 raise ValueError(
                     f"invalid transcript JSON on line {line_number}: {error}"
                 ) from error
@@ -323,14 +341,128 @@ def read_jsonl_records(transcript_path: Path) -> Iterator[Dict[str, Any]]:
             yield record
 
 
+def is_main_claude_assistant(record: Dict[str, Any]) -> bool:
+    message = record.get("message")
+    return (
+        record.get("type") == "assistant"
+        and not record.get("isSidechain")
+        and isinstance(message, dict)
+        and message.get("role") == "assistant"
+    )
+
+
+def reconcile_claude_stop_message(
+    pending: list[Dict[str, Any]], final_text: str
+) -> Iterator[Dict[str, Any]]:
+    """Merge Stop's authoritative final text with the last on-disk API message.
+
+    Only the latest main-agent message since the last user/tool result is eligible
+    for deduplication. An identical answer to an earlier prompt must be retained.
+    Claude may persist the blocks of one API message as separate JSONL records.
+    """
+    assistants = [record for record in pending if is_main_claude_assistant(record)]
+    text_parts = []
+    text_records = []
+    has_tool_call = False
+    for record in assistants:
+        content = record["message"].get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for block in blocks if isinstance(blocks, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                has_tool_call = True
+            text = block.get("text")
+            if block.get("type") == "text" and isinstance(text, str) and text.strip():
+                text_parts.append(text)
+                text_records.append(record)
+
+    # Block separators can differ between Claude versions. Normalize only line
+    # endings and outer whitespace for matching; keep the original reply intact.
+    expected = final_text.replace("\r\n", "\n").strip()
+    candidates = {
+        separator.join(text_parts).replace("\r\n", "\n").strip()
+        for separator in ("", "\n", "\n\n")
+    } - {""}
+    if (
+        not has_tool_call
+        and expected in candidates
+        and all(record["message"].get("stop_reason") == "end_turn" for record in text_records)
+    ):
+        yield from pending
+        return
+
+    replace_partial = not has_tool_call and any(expected.startswith(text) for text in candidates)
+    for record in pending:
+        if replace_partial and is_main_claude_assistant(record):
+            message = record["message"]
+            content = message.get("content")
+            remaining = [
+                block for block in content
+                if not isinstance(block, dict) or block.get("type") != "text"
+            ] if isinstance(content, list) else []
+            # Preserve thinking and other non-text blocks for full archives.
+            record = {**record, "message": {**message, "content": remaining}}
+        yield record
+
+    final_record: Dict[str, Any] = {
+        "type": "assistant",
+        "isSidechain": False,
+        "message": {
+            "role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": final_text}],
+        },
+    }
+    if replace_partial and text_records and text_records[0].get("timestamp"):
+        final_record["timestamp"] = text_records[0]["timestamp"]
+    yield final_record
+
+
+def claude_records_with_stop_message(
+    records: Iterator[Dict[str, Any]], final_text: str
+) -> Iterator[Dict[str, Any]]:
+    """Buffer only the last API message, not the entire conversation or turn."""
+    pending: list[Dict[str, Any]] = []
+    pending_message_id = None
+    for record in records:
+        if is_main_claude_assistant(record):
+            message_id = record["message"].get("id")
+            if pending and (not message_id or message_id != pending_message_id):
+                yield from pending
+                pending = []
+            pending_message_id = message_id
+            pending.append(record)
+        elif record.get("type") == "user" and not record.get("isSidechain"):
+            # A new prompt (even the same text) or tool result starts a new
+            # response boundary. Never deduplicate against the preceding answer.
+            yield from pending
+            pending = []
+            pending_message_id = None
+            yield record
+        elif pending:
+            pending.append(record)
+        else:
+            yield record
+    yield from reconcile_claude_stop_message(pending, final_text)
+
+
 def filtered_events(
-    transcript_path: Path, agent_name: str, mode: str
+    transcript_path: Path, agent_name: str, mode: str,
+    last_assistant_message: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield privacy-filtered events for a supported coding agent."""
     filter_record = (
         filter_codex_record if agent_name == "codex" else filter_claude_record
     )
-    for record in read_jsonl_records(transcript_path):
+    include_stop_message = (
+        agent_name == "claude-code"
+        and isinstance(last_assistant_message, str)
+        and bool(last_assistant_message.strip())
+    )
+    records = read_jsonl_records(transcript_path, allow_incomplete_tail=include_stop_message)
+    if include_stop_message:
+        records = claude_records_with_stop_message(records, last_assistant_message)
+    for record in records:
         yield from filter_record(record, mode)
 
 
@@ -498,10 +630,11 @@ def write_archive(
     agent_name: str,
     mode: str,
     session_id: Optional[str] = None,
+    last_assistant_message: Optional[str] = None,
 ) -> None:
     """Stream one Markdown view; never write a second raw transcript copy."""
     agent_label = "Codex" if agent_name == "codex" else "Claude Code"
-    events = filtered_events(transcript_path, agent_name, mode)
+    events = filtered_events(transcript_path, agent_name, mode, last_assistant_message)
     first_event = next(events, None)
     started = timestamp_text(first_event.get("timestamp")) if first_event else ""
 
@@ -559,7 +692,15 @@ def archive_transcript(payload: Dict[str, Any]) -> None:
         return
 
     agent_name = "codex" if os.environ.get("PLUGIN_ROOT") else "claude-code"
-    archive_mode = read_archive_mode(repository_root)
+    archive_mode = read_archive_mode(repository_root, agent_name)
+    # Stop can run before Claude flushes the final response to transcript_path.
+    # The official input carries that response directly. Do not reuse it for
+    # SessionEnd, an interrupted/error turn, a subagent, or a Codex hook.
+    last_assistant_message = (
+        payload.get("last_assistant_message")
+        if agent_name == "claude-code" and payload.get("hook_event_name") == "Stop"
+        else None
+    )
     archive_root = repository_root / ARCHIVE_DIR_NAME
     archive_dir = archive_root / agent_name
     archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -579,7 +720,10 @@ def archive_transcript(payload: Dict[str, Any]) -> None:
 
     try:
         with os.fdopen(file_descriptor, "wb") as output_file:
-            write_archive(transcript_path, output_file, agent_name, archive_mode, session_id)
+            write_archive(
+                transcript_path, output_file, agent_name, archive_mode, session_id,
+                last_assistant_message,
+            )
             output_file.flush()
             os.fsync(output_file.fileno())
         temporary_path.chmod(0o600)

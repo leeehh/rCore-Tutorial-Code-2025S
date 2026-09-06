@@ -60,6 +60,44 @@ class ArchiveModeTests(unittest.TestCase):
             for expected_mode in archive_session.SUPPORTED_MODES:
                 write_config(root, ".codex/langfuse.json", {"mode": expected_mode})
                 self.assertEqual(expected_mode, archive_session.read_archive_mode(root))
+                write_config(root, ".claude/settings.local.json", {
+                    "env": {"RCORE_SESSION_ARCHIVE_MODE": expected_mode},
+                })
+                self.assertEqual(expected_mode, archive_session.read_archive_mode(root, "claude-code"))
+
+    def test_agent_modes_are_independent(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_config(root, ".codex/langfuse.json", {"mode": "full"})
+            write_config(root, ".claude/settings.local.json", {
+                "env": {"RCORE_SESSION_ARCHIVE_MODE": "tool-calls"},
+            })
+            self.assertEqual("full", archive_session.read_archive_mode(root, "codex"))
+            self.assertEqual("tool-calls", archive_session.read_archive_mode(root, "claude-code"))
+
+    def test_claude_missing_mode_does_not_use_codex_or_process_environment(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_config(root, ".codex/langfuse.json", {"mode": "full"})
+            write_config(root, ".agents/session-archive.json", {"mode": "full"})
+            with mock.patch.dict(os.environ, {"RCORE_SESSION_ARCHIVE_MODE": "full"}):
+                self.assertEqual("messages", archive_session.read_archive_mode(root, "claude-code"))
+                write_config(root, ".claude/settings.local.json", {"env": {"LANGFUSE_PUBLIC_KEY": "example"}})
+                self.assertEqual("messages", archive_session.read_archive_mode(root, "claude-code"))
+
+    def test_invalid_claude_config_does_not_fall_back_to_codex(self):
+        for content in (
+            b"{", b"\xff", b"[]", b'{"env": []}', b'{"env": null}',
+            b'{"env": {"RCORE_SESSION_ARCHIVE_MODE": []}}',
+            b'{"env": {"RCORE_SESSION_ARCHIVE_MODE": "unknown"}}',
+        ):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                write_config(root, ".codex/langfuse.json", {"mode": "full"})
+                path = write_config(root, ".claude/settings.local.json", {})
+                path.write_bytes(content)
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual("messages", archive_session.read_archive_mode(root, "claude-code"))
 
     def test_langfuse_mode_overrides_legacy_choice(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -106,11 +144,12 @@ class SetupConfigTests(unittest.TestCase):
                 str(root),
                 str(REPOSITORY_ROOT / ".codex/langfuse.example.json"),
                 str(credential),
+                str(REPOSITORY_ROOT / ".claude/settings.local.example.json"),
             ],
             capture_output=True, text=True, timeout=10,
         )
 
-    def test_setup_creates_shared_mode_without_legacy_file(self):
+    def test_setup_creates_codex_mode_without_legacy_file(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result = self.run_setup(root)
@@ -156,7 +195,7 @@ class SetupConfigTests(unittest.TestCase):
             self.assertIn("占位配置", result.stderr)
             self.assertFalse((root / ".agents/session-archive.json").exists())
 
-    def test_codex_setup_after_claude_only_keeps_mode_and_adds_template_fields(self):
+    def test_codex_setup_with_old_mode_only_config_adds_template_fields(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result = self.run_setup(root)
@@ -223,6 +262,144 @@ class SetupConfigTests(unittest.TestCase):
             self.assertNotIn("占位配置", result.stdout + result.stderr)
             self.assertNotIn("private-token", result.stdout + result.stderr)
             self.assertEqual(existing, json.loads(config_path.read_text()))
+
+    def test_claude_only_setup_creates_settings_without_codex_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = self.run_setup(root, '\n'.join((
+                "read_archive_config claude",
+                'prepare_private_config "$5" "$REPOSITORY_ROOT/.claude/settings.local.json" "Claude Code"',
+                "prepare_archive_config claude",
+                'COMPLETED_AGENTS=("Claude Code")',
+                "print_summary",
+            )))
+            self.assertEqual(0, result.returncode, result.stderr)
+            path = root / ".claude/settings.local.json"
+            config = json.loads(path.read_text())
+            self.assertEqual("messages", config["env"]["RCORE_SESSION_ARCHIVE_MODE"])
+            self.assertIn("LANGFUSE_SECRET_KEY", config["env"])
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+            self.assertFalse((root / ".codex").exists())
+            self.assertFalse((root / ".claude/langfuse.json").exists())
+            self.assertIn("Claude Code 留档等级：messages", result.stdout)
+            self.assertNotIn("Codex 留档等级", result.stdout)
+            self.assertIn("占位配置", result.stderr)
+
+    def test_claude_migrates_shared_mode_once_without_changing_codex_or_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            codex_path = write_config(root, ".codex/langfuse.json", {"mode": "full", "secret_key": "codex-secret"})
+            original_codex = codex_path.read_bytes()
+            existing = {
+                "$schema": "https://json.schemastore.org/claude-code-settings.json",
+                "permissions": {"allow": ["Read"]},
+                "env": {"LANGFUSE_SECRET_KEY": "claude-secret", "UNRELATED": "retained", "CC_LANGFUSE_DEBUG": "true"},
+            }
+            path = write_config(root, ".claude/settings.local.json", existing)
+            steps = '\n'.join((
+                "read_archive_config claude",
+                'prepare_private_config "$5" "$REPOSITORY_ROOT/.claude/settings.local.json" "Claude Code"',
+                "prepare_archive_config claude",
+            ))
+            result = self.run_setup(root, steps)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(original_codex, codex_path.read_bytes())
+            expected = {**existing, "env": {**existing["env"], "RCORE_SESSION_ARCHIVE_MODE": "full"}}
+            self.assertEqual(expected, json.loads(path.read_text()))
+            self.assertNotIn("claude-secret", result.stdout + result.stderr)
+            codex_path.write_text('{"mode": "messages"}')
+            for _ in range(2):
+                result = self.run_setup(root, steps)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(expected, json.loads(path.read_text()))
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
+    def test_claude_setup_ignores_invalid_codex_when_own_mode_is_set(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            codex_path = write_config(root, ".codex/langfuse.json", {})
+            codex_path.write_bytes(b"{broken")
+            path = write_config(root, ".claude/settings.local.json", {"env": {"RCORE_SESSION_ARCHIVE_MODE": "messages"}})
+            result = self.run_setup(root, "read_archive_config claude\nprepare_archive_config claude")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("messages", json.loads(path.read_text())["env"]["RCORE_SESSION_ARCHIVE_MODE"])
+            self.assertEqual(b"{broken", codex_path.read_bytes())
+
+    def test_claude_first_setup_migrates_legacy_before_template_default(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            legacy = write_config(root, ".agents/session-archive.json", {"mode": "tool-calls"})
+            marketplace = write_config(root, ".agents/plugins/marketplace.json", {"name": "test-marketplace"})
+            result = self.run_setup(root, '\n'.join((
+                "read_archive_config claude",
+                'prepare_private_config "$5" "$REPOSITORY_ROOT/.claude/settings.local.json" "Claude Code"',
+                "prepare_archive_config claude",
+            )))
+            self.assertEqual(0, result.returncode, result.stderr)
+            config = json.loads((root / ".claude/settings.local.json").read_text())
+            self.assertEqual("tool-calls", config["env"]["RCORE_SESSION_ARCHIVE_MODE"])
+            self.assertFalse(legacy.exists())
+            self.assertTrue(marketplace.exists())
+            self.assertFalse((root / ".codex").exists())
+
+    def test_claude_credential_import_preserves_mode_and_other_settings(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            existing = {
+                "permissions": {"allow": ["Read"]},
+                "env": {"RCORE_SESSION_ARCHIVE_MODE": "tool-calls", "UNRELATED": "retained", "LANGFUSE_USER_ID": "untrusted"},
+            }
+            path = write_config(root, ".claude/settings.local.json", existing)
+            credential = {
+                "student_id": "20250001", "public_key": "pk-lf-stu-20250001",
+                "secret_key": "sk-lf-token-" + "example" * 5,
+                "base_url": "https://example.invalid:8443",
+            }
+            credential_path = write_config(root, "credential.json", credential)
+            result = self.run_setup(root, '\n'.join((
+                "read_archive_config claude",
+                'prepare_private_config "$5" "$REPOSITORY_ROOT/.claude/settings.local.json" "Claude Code"',
+                "prepare_archive_config claude",
+            )), credential_path)
+            self.assertEqual(0, result.returncode, result.stderr)
+            config = json.loads(path.read_text())
+            self.assertEqual("tool-calls", config["env"]["RCORE_SESSION_ARCHIVE_MODE"])
+            self.assertEqual("retained", config["env"]["UNRELATED"])
+            self.assertEqual(existing["permissions"], config["permissions"])
+            self.assertEqual(credential["secret_key"], config["env"]["LANGFUSE_SECRET_KEY"])
+            self.assertNotIn("LANGFUSE_USER_ID", config["env"])
+            self.assertNotIn(credential["secret_key"], result.stdout + result.stderr)
+            self.assertFalse((root / ".codex").exists())
+
+    def test_setup_keeps_different_modes_for_both_agents(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            codex = write_config(root, ".codex/langfuse.json", {"mode": "full"})
+            claude = write_config(root, ".claude/settings.local.json", {"env": {"RCORE_SESSION_ARCHIVE_MODE": "messages"}})
+            result = self.run_setup(root, '\n'.join((
+                "read_archive_config codex", "prepare_archive_config codex",
+                "read_archive_config claude", "prepare_archive_config claude",
+                'COMPLETED_AGENTS=("Codex" "Claude Code")', "print_summary",
+            )))
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("full", json.loads(codex.read_text())["mode"])
+            self.assertEqual("messages", json.loads(claude.read_text())["env"]["RCORE_SESSION_ARCHIVE_MODE"])
+            self.assertIn("Codex 留档等级：full", result.stdout)
+            self.assertIn("Claude Code 留档等级：messages", result.stdout)
+
+    def test_invalid_claude_config_is_not_overwritten(self):
+        for content in (b"{", b"\xff", b"[]", b'{"env": []}', b'{"env": {"RCORE_SESSION_ARCHIVE_MODE": "unknown"}}'):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                path = write_config(root, ".claude/settings.local.json", {})
+                path.write_bytes(content)
+                legacy = write_config(root, ".agents/session-archive.json", {"mode": "full"})
+                result = self.run_setup(root, "read_archive_config claude\nprepare_archive_config claude")
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(content, path.read_bytes())
+                self.assertTrue(legacy.exists())
+                self.assertFalse((root / ".codex").exists())
 
 
 class CodexFilterTests(unittest.TestCase):
@@ -407,6 +584,220 @@ class ClaudeFilterTests(unittest.TestCase):
         serialized = json.dumps(events)
         self.assertIn("run-command --flag", serialized)
         self.assertNotIn("tool-output-secret", serialized)
+
+
+class ClaudeStopMessageTests(unittest.TestCase):
+    @staticmethod
+    def assistant(text, message_id="reply-1", stop_reason="end_turn", **record_fields):
+        return {
+            "type": "assistant", "isSidechain": False,
+            "message": {
+                "id": message_id, "role": "assistant", "stop_reason": stop_reason,
+                "content": [{"type": "text", "text": text}],
+            },
+            **record_fields,
+        }
+
+    def render(self, records, final_text=None, mode="messages"):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = transcript_file(Path(temporary_directory), records)
+            output = io.BytesIO()
+            archive_session.write_archive(path, output, "claude-code", mode, "session", final_text)
+            return output.getvalue().decode("utf-8")
+
+    def test_unflushed_reply_is_present_in_every_archive_mode(self):
+        records = ClaudeFilterTests.RECORDS[:-1]
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                result = self.render(records, "latest reply", mode)
+                self.assertEqual(1, result.count("latest reply"))
+                self.assertEqual(1, result.count("### Claude Code\n"))
+                self.assertIn("user question", result)
+                self.assertEqual(mode != "messages", "run-command --flag" in result)
+                self.assertEqual(mode == "full", "tool-output-secret" in result)
+                self.assertEqual(mode == "full", "intermediate-secret" in result)
+
+    def test_flushed_reply_is_not_duplicated_or_changed(self):
+        records = [ClaudeFilterTests.RECORDS[0], self.assistant("latest reply")]
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(self.render(records, mode=mode), self.render(records, "latest reply", mode))
+
+    def test_same_answer_to_a_new_prompt_is_not_suppressed(self):
+        records = [ClaudeFilterTests.RECORDS[0], self.assistant("same answer"), ClaudeFilterTests.RECORDS[0]]
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                result = self.render(records, "same answer", mode)
+                self.assertEqual(2, result.count("same answer"))
+                self.assertEqual(2, result.count("### Claude Code\n"))
+                self.assertEqual(2, result.count("## 第 "))
+
+    def test_only_latest_api_message_is_eligible_for_deduplication(self):
+        records = [
+            ClaudeFilterTests.RECORDS[0],
+            self.assistant("repeated text", "earlier"),
+            self.assistant("a different continuation", "later"),
+        ]
+        result = self.render(records, "repeated text")
+        self.assertEqual(2, result.count("repeated text"))
+        self.assertIn("a different continuation", result)
+
+    def test_tool_result_and_intermediate_text_do_not_suppress_final(self):
+        intermediate = self.assistant("latest reply", stop_reason="tool_use")
+        intermediate["message"]["content"].append({"type": "tool_use", "name": "Bash", "id": "tool-1", "input": {"command": "pwd"}})
+        records = [ClaudeFilterTests.RECORDS[0], intermediate, ClaudeFilterTests.RECORDS[-2]]
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                result = self.render(records, "latest reply", mode)
+                self.assertEqual(1, result.count("### Claude Code\n"))
+                self.assertEqual(2 if mode == "full" else 1, result.count("latest reply"))
+
+    def test_text_in_a_tool_call_message_is_not_promoted_to_final(self):
+        intermediate = self.assistant("latest reply", stop_reason="tool_use")
+        intermediate["message"]["content"].append({"type": "tool_use", "name": "Bash", "id": "tool-1", "input": {"command": "pwd"}})
+        result = self.render([ClaudeFilterTests.RECORDS[0], intermediate], "latest reply", "full")
+        self.assertEqual(1, result.count("### Claude Code\n"))
+        self.assertIn("### Claude Code 中间输出", result)
+        self.assertIn("### 工具调用：Bash", result)
+
+    def test_multipart_reply_with_same_message_id_is_deduplicated(self):
+        records = [ClaudeFilterTests.RECORDS[0], self.assistant("first block"), self.assistant("second block")]
+        for separator in ("", "\n", "\n\n"):
+            for mode in archive_session.SUPPORTED_MODES:
+                with self.subTest(separator=separator, mode=mode):
+                    result = self.render(records, separator.join(("first block", "second block")), mode)
+                    self.assertEqual(self.render(records, mode=mode), result)
+                    self.assertEqual(1, result.count("first block"))
+                    self.assertEqual(1, result.count("second block"))
+
+    def test_partial_text_is_replaced_with_complete_reply(self):
+        complete = "回复开始\n\n```rust\nfn main() {}\n```\n\n回复完成"
+        partial = self.assistant("回复开始", stop_reason=None)
+        partial["message"]["content"].insert(0, {"type": "thinking", "thinking": "readable reasoning"})
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                result = self.render([ClaudeFilterTests.RECORDS[0], partial], complete, mode)
+                self.assertEqual(1, result.count("回复开始"))
+                self.assertEqual(1, result.count("### Claude Code\n"))
+                self.assertIn(complete, result)
+                self.assertEqual(mode == "full", "readable reasoning" in result)
+
+    def test_final_text_without_persisted_stop_reason_is_promoted(self):
+        records = [ClaudeFilterTests.RECORDS[0], self.assistant("latest reply", stop_reason=None)]
+        for mode in archive_session.SUPPORTED_MODES:
+            with self.subTest(mode=mode):
+                result = self.render(records, "latest reply", mode)
+                self.assertEqual(1, result.count("latest reply"))
+                self.assertEqual(1, result.count("### Claude Code\n"))
+
+    def test_sidechain_reply_does_not_suppress_main_reply(self):
+        records = [ClaudeFilterTests.RECORDS[0], self.assistant("latest reply", isSidechain=True)]
+        result = self.render(records, "latest reply")
+        self.assertEqual(1, result.count("latest reply"))
+        self.assertEqual(1, result.count("### Claude Code\n"))
+
+    def test_reply_after_interrupted_turn_is_included(self):
+        records = [
+            *ClaudeFilterTests.RECORDS[:-1],
+            {"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]"}},
+            {"type": "user", "message": {"role": "user", "content": "continue"}},
+        ]
+        result = self.render(records, "resumed final reply")
+        self.assertIn("continue", result)
+        self.assertEqual(1, result.count("resumed final reply"))
+        self.assertNotIn("tool-output-secret", result)
+
+    def test_missing_empty_and_non_string_fallbacks_are_ignored(self):
+        records = [ClaudeFilterTests.RECORDS[0]]
+        for value in (None, "", " \n", [], {}, 123):
+            with self.subTest(value=value):
+                self.assertEqual(self.render(records), self.render(records, value))
+
+    def test_incomplete_tail_is_tolerated_only_with_stop_reply(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = transcript_file(Path(temporary_directory), [ClaudeFilterTests.RECORDS[0]])
+            with path.open("ab") as output:
+                output.write(b'{"type":"assistant","message":{"content":"partial')
+            original = path.read_bytes()
+            for mode in archive_session.SUPPORTED_MODES:
+                output = io.BytesIO()
+                archive_session.write_archive(path, output, "claude-code", mode, "session", "complete reply")
+                self.assertIn(b"complete reply", output.getvalue())
+                self.assertEqual(original, path.read_bytes())
+            with self.assertRaises(ValueError):
+                list(archive_session.read_jsonl_records(path))
+
+    def test_corrupt_complete_line_is_not_hidden_by_stop_reply(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = transcript_file(Path(temporary_directory), [ClaudeFilterTests.RECORDS[0]])
+            with path.open("ab") as output:
+                output.write(b'{broken JSON}\n')
+            with self.assertRaisesRegex(ValueError, "invalid transcript JSON on line 2"):
+                list(archive_session.filtered_events(path, "claude-code", "messages", "complete reply"))
+
+    def test_repeated_stop_then_session_end_keep_one_complete_reply(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            path = transcript_file(root, ClaudeFilterTests.RECORDS[:-1])
+            original = path.read_bytes()
+            payload = {
+                "cwd": str(root), "session_id": "session", "transcript_path": str(path),
+                "hook_event_name": "Stop", "last_assistant_message": "latest reply",
+            }
+            destination = root / ".agent-sessions/claude-code/session.md"
+            with mock.patch.object(archive_session, "find_repository_root", return_value=root), \
+                 mock.patch.object(archive_session, "is_rcore_repository", return_value=True), \
+                 mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": "plugin"}, clear=True):
+                archive_session.archive_transcript(payload)
+                first_render = destination.read_bytes()
+                for _ in range(2):
+                    archive_session.archive_transcript(payload)
+                    self.assertEqual(first_render, destination.read_bytes())
+                self.assertEqual(original, path.read_bytes())
+                transcript_file(root, [*ClaudeFilterTests.RECORDS[:-1], self.assistant("latest reply")])
+                flushed = path.read_bytes()
+                archive_session.archive_transcript(payload)
+                self.assertEqual(first_render, destination.read_bytes())
+                archive_session.archive_transcript({**payload, "hook_event_name": "SessionEnd"})
+                self.assertEqual(first_render, destination.read_bytes())
+                self.assertEqual(flushed, path.read_bytes())
+            self.assertEqual(1, destination.read_text().count("latest reply"))
+            self.assertEqual([destination], list(destination.parent.iterdir()))
+            self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+
+    def test_fallback_is_used_only_for_claude_stop(self):
+        for agent, event in (("claude-code", "SessionEnd"), ("claude-code", "StopFailure"), ("claude-code", "SubagentStop"), ("claude-code", None), ("codex", "Stop")):
+            with self.subTest(agent=agent, event=event), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                source = transcript_file(root, ClaudeFilterTests.RECORDS if agent == "claude-code" else CodexFilterTests.RECORDS)
+                payload = {"cwd": str(root), "session_id": "session", "transcript_path": str(source), "hook_event_name": event, "last_assistant_message": "should-not-be-injected"}
+                environment = {"CLAUDE_PLUGIN_ROOT": "plugin"} if agent == "claude-code" else {"PLUGIN_ROOT": "plugin"}
+                with mock.patch.object(archive_session, "find_repository_root", return_value=root), \
+                     mock.patch.object(archive_session, "is_rcore_repository", return_value=True), \
+                     mock.patch.dict(os.environ, environment, clear=True):
+                    archive_session.archive_transcript(payload)
+                result = (root / ".agent-sessions" / agent / "session.md").read_text()
+                self.assertNotIn("should-not-be-injected", result)
+                self.assertIn("final answer", result)
+
+    def test_cli_stop_recovers_first_reply_in_claude_only_repository(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+            (root / "README.md").write_text("# rCore-Tutorial-Code-2025S\n")
+            write_config(root, ".claude/settings.local.json", {"env": {"RCORE_SESSION_ARCHIVE_MODE": "messages"}})
+            path = transcript_file(root, [ClaudeFilterTests.RECORDS[0]])
+            original = path.read_bytes()
+            environment = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(SCRIPT_PATH.parents[1]), "RCORE_SESSION_ARCHIVE_MODE": "full"}
+            environment.pop("PLUGIN_ROOT", None)
+            payload = {"cwd": str(root), "session_id": "session", "transcript_path": str(path), "hook_event_name": "Stop", "last_assistant_message": "reply delivered in hook input"}
+            result = subprocess.run(["python3", str(SCRIPT_PATH.resolve())], input=json.dumps(payload), text=True, capture_output=True, env=environment, timeout=10)
+            self.assertEqual(0, result.returncode, result.stderr)
+            archived = (root / ".agent-sessions/claude-code/session.md").read_text()
+            self.assertIn("归档等级：messages", archived)
+            self.assertEqual(1, archived.count("reply delivered in hook input"))
+            self.assertEqual(original, path.read_bytes())
+            self.assertFalse((root / ".codex").exists())
 
 
 class ArchiveWriterTests(unittest.TestCase):
@@ -628,17 +1019,18 @@ class ArchiveWriterTests(unittest.TestCase):
     def test_claude_mode_change_rewrites_one_markdown_without_json_backup(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            (root / ".codex").mkdir()
-            config = root / ".codex/langfuse.json"
+            config = write_config(root, ".claude/settings.local.json", {})
+            codex_config = write_config(root, ".codex/langfuse.json", {"mode": "full"})
+            codex_original = codex_config.read_bytes()
             source = transcript_file(root, ClaudeFilterTests.RECORDS)
             original = source.read_bytes()
             payload = {"transcript_path": str(source), "session_id": "claude-session", "cwd": str(root)}
             destination = root / ".agent-sessions/claude-code/claude-session.md"
             with mock.patch.object(archive_session, "find_repository_root", return_value=root), \
                  mock.patch.object(archive_session, "is_rcore_repository", return_value=True), \
-                 mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": "plugin"}, clear=True):
+                 mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": "plugin", "RCORE_SESSION_ARCHIVE_MODE": "full"}, clear=True):
                 for mode in ("full", "tool-calls", "messages"):
-                    config.write_text(json.dumps({"mode": mode}))
+                    config.write_text(json.dumps({"env": {"RCORE_SESSION_ARCHIVE_MODE": mode}}))
                     archive_session.archive_transcript(payload)
                     rendered = destination.read_text()
                     self.assertEqual(mode == "full", "tool-output-secret" in rendered)
@@ -646,6 +1038,7 @@ class ArchiveWriterTests(unittest.TestCase):
                     self.assertEqual(1, rendered.count("final answer"))
                     self.assertEqual([destination], list(destination.parent.iterdir()))
             self.assertEqual(original, source.read_bytes())
+            self.assertEqual(codex_original, codex_config.read_bytes())
 
     def test_legacy_symlinks_are_not_removed(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

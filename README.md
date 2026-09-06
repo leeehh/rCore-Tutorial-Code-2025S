@@ -96,9 +96,9 @@ git pull --ff-only
 | 文件 | 用途 | 是否提交 Git |
 | --- | --- | --- |
 | `.codex/config.toml` | 在本仓库启用 Codex hooks 和两个插件 | 是 |
-| `.codex/langfuse.json` | Codex 的个人 Langfuse 凭据，以及两个 Agent 共用的本地留档等级 `mode` | 否 |
+| `.codex/langfuse.json` | Codex 的个人 Langfuse 凭据与本地留档等级 `mode` | 否 |
 | `.claude/settings.json` | 在本仓库启用 Claude Code 的两个插件 | 是 |
-| `.claude/settings.local.json` | Claude Code 的个人 Langfuse 凭据 | 否 |
+| `.claude/settings.local.json` | Claude Code 的个人 Langfuse 凭据与本地留档等级 `env.RCORE_SESSION_ARCHIVE_MODE` | 否 |
 | `.agent-sessions/` | 实际会话留档目录 | 否 |
 
 凭据只写入当前项目目录，不会写入用户主目录。上述个人配置、下载的 token JSON 和
@@ -153,9 +153,11 @@ Agent。在其他目录启动时，项目配置不会生效，也不会上传或
 
 #### 5. 配置本地留档等级
 
-编辑 `.codex/langfuse.json` 的顶层 `mode` 字段，即可选择本地留档内容。
-它和 `enabled`、`public_key`、`secret_key` 等 Langfuse 配置放在同一个 JSON 对象中，
-准备脚本默认设置为 `messages`：
+两个 Agent 使用各自的项目配置，归档等级互不影响。准备脚本默认设置为 `messages`，
+重新运行时保留已有选择。
+
+Codex：编辑 `.codex/langfuse.json` 的顶层 `mode` 字段，和 `enabled`、
+`public_key`、`secret_key` 等 Langfuse 配置放在同一个 JSON 对象中：
 
 ```json
 {
@@ -163,10 +165,25 @@ Agent。在其他目录启动时，项目配置不会生效，也不会上传或
 }
 ```
 
-上面只展示归档字段；编辑已有文件时保留其他字段。完整示例见
-[`.codex/langfuse.example.json`](.codex/langfuse.example.json)。
-Codex 和 Claude Code 的本地归档都读取这里的 `mode`；仅安装 Claude Code 时，
-脚本也会生成这份配置，其上传凭据仍保存在 `.claude/settings.local.json`。
+Claude Code：编辑 `.claude/settings.local.json` 中的
+`env.RCORE_SESSION_ARCHIVE_MODE`，Langfuse 凭据继续使用同一个 `env` 中的
+`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_BASE_URL`：
+
+```json
+{
+  "env": {
+    "RCORE_SESSION_ARCHIVE_MODE": "messages"
+  }
+}
+```
+
+以上片段只展示归档字段；编辑已有文件时保留其他字段和环境变量。完整示例见
+[`.codex/langfuse.example.json`](.codex/langfuse.example.json) 和
+[`.claude/settings.local.example.json`](.claude/settings.local.example.json)。
+`RCORE_SESSION_ARCHIVE_MODE` 由本仓库的归档插件读取，不是 Langfuse 官方插件的配置项；
+它放在官方支持的 `env` 中，不添加自定义顶层设置，不修改官方上传插件。
+Claude Code 不需要单独的 `.claude/langfuse.json`，仅安装 Claude Code 也不会生成
+`.codex/langfuse.json`。
 
 | `mode` | 保存内容 |
 | --- | --- |
@@ -177,13 +194,23 @@ Codex 和 Claude Code 的本地归档都读取这里的 `mode`；仅安装 Claud
 `full` 保存的是可读的会话内容，不重复保存内部传输事件、token 计数、加密字段等运行元数据。
 每次 hook 都会完整重写同一会话的 `.md` 文件，不会重复追加历史内容。升级后，同一会话
 成功写入 Markdown 时会清理对应的旧 `.jsonl` 留档；其他历史会话文件不会自动转换或删除。
+Claude Code 的 `Stop` 归档会同时读取 hook 携带的最终回复，避免原始会话文件尚未落盘时
+漏掉最新回答。已保存的本轮回复不会重复写入，不同轮内容相同的回答仍分别保留。
 
-旧的 `.agents/session-archive.json` 已停用。重新运行准备脚本会迁移其中的等级，
-保留已有 Langfuse 凭据，并在新配置成功写入后删除旧文件；新位置已有 `mode` 时优先保留。
+升级已有安装时，重新运行 `./scripts/setup-agent-plugins.sh claude` 即可更新插件并迁移
+配置。Claude 尚未设置 `RCORE_SESSION_ARCHIVE_MODE` 时，脚本会沿用此前
+`.codex/langfuse.json` 中的归档等级；保存后独立使用 Claude 的配置，不再随 Codex 的
+等级变化。只迁移归档等级，不复制或覆盖两个 Agent 各自的凭据。
+
+旧的 `.agents/session-archive.json` 已停用。准备脚本仍支持迁移其中的等级，
+在所选 Agent 的新配置成功写入后删除旧文件；新位置已有等级时优先保留。
 `.agents/plugins/` 中的插件源配置仍需保留。
 
-归档插件只读取 `.codex/langfuse.json`；文件或 `mode` 缺失、JSON 格式错误、`mode`
-不受支持时会回退到 `messages`。准备脚本遇到无效配置则会报错，要求修正后再安装。
-`mode` 只控制本地 Markdown 留档，Langfuse 上传内容仍由上传插件决定。修改等级只会
-影响之后的 hook 刷新，不会重新处理已经结束的旧会话。即使使用 `messages`，输入和
+归档插件每次只读取当前 Agent 对应的项目配置文件，不使用另一个 Agent 的等级或进程中
+缓存的归档环境变量。文件或归档字段缺失、JSON 格式错误、等级不受支持时会回退到
+`messages`。准备脚本遇到无效配置则会报错，要求修正后再安装。
+等级只控制本地 Markdown 留档，Langfuse 上传内容仍由上传插件决定。更新插件后需要
+重新打开 Agent；之后修改归档等级会在下一次 hook 刷新时生效，无需重新安装插件，也不会
+重新处理已经结束的旧会话。修改 Claude 的 Langfuse 凭据后则应重启 Claude Code，以加载
+新的环境变量。即使使用 `messages`，输入和
 回答中也可能包含源码或隐私信息，因此不要分享 `.agent-sessions/`。

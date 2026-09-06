@@ -1,6 +1,6 @@
 {
   "name": "rcore-session-archive",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "Archives readable Markdown conversations inside the local rCore checkout",
   "author": {
     "name": "rCore Tutorial teaching team"
