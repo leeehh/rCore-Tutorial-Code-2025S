@@ -40,17 +40,19 @@ Notice: $ID is from [1-9]
 
 ### Code Agent 会话上传与本地留档
 
-本仓库提供环境准备脚本，可为 Codex、Claude Code 安装 Langfuse 会话上传插件和
-rCore 本地留档插件。插件在用户全局配置中保持关闭，只由本仓库中的项目配置启用，
-因此只有从本仓库目录（或其子目录）启动的 Agent 才会上传和保存会话。
+本仓库提供环境准备脚本，支持 Codex、Claude Code 和 Cursor 的 Langfuse 会话上传与
+本地 Markdown 留档。Codex / Claude Code 的插件全局关闭、项目内启用；Cursor 使用
+本仓库的原生 hooks，不安装全局 hooks。凭据只保存在项目内。
 
 #### 1. 前置条件
 
-- 已安装并能够正常运行 Codex CLI 或 Claude Code。
+- 已安装并能够正常运行 Codex CLI、Claude Code 或支持项目 hooks 的新版 Cursor。
 - 已安装 Git 和 Python 3.9 或更高版本。
 - 使用 Codex 时需要 Node.js 22 或更高版本。
 - 使用 Claude Code 时需要 `uv`；或者 Python 3.10 及
   `langfuse>=4.7,<5`。
+- Cursor 适配器只使用 Python 标准库，不需要 Node.js、`uv` 或额外 Langfuse SDK；
+  本次接入面向 Cursor 编辑器的 Agent 会话，不包含 Tab 自动补全。
 
 #### 2. 注册并下载个人凭据
 
@@ -69,7 +71,7 @@ rCore 本地留档插件。插件在用户全局配置中保持关闭，只由�
 git switch main
 git pull --ff-only
 
-# 自动配置本机已经安装的 Codex 和/或 Claude Code（推荐）
+# 自动配置能够检测到 CLI 的 Agent
 ./scripts/setup-agent-plugins.sh auto /path/to/rcore-agent-token-<学号>.json
 ```
 
@@ -82,14 +84,25 @@ git pull --ff-only
 # 仅 Claude Code
 ./scripts/setup-agent-plugins.sh claude /path/to/rcore-agent-token-<学号>.json
 
-# 同时要求配置两者；缺少任一 Agent 时脚本会报错
+# 仅 Cursor；即使没有安装 cursor 命令也可以配置
+./scripts/setup-agent-plugins.sh cursor /path/to/rcore-agent-token-<学号>.json
+
+# 配置三者；缺少 Codex / Claude Code CLI 时会报错
 ./scripts/setup-agent-plugins.sh all /path/to/rcore-agent-token-<学号>.json
 ```
 
-脚本会安装或更新以下两个插件：
+如果只安装了 Cursor 图形界面，请显式使用 `cursor`，不要依赖 `auto` 的 CLI 检测。
+脚本不安装 Agent 客户端本身。
+
+Codex / Claude Code 会安装或更新以下两个插件：
 
 - Langfuse 官方插件：把本仓库内的 Agent 会话上传到课程服务器。
 - `rcore-session-archive`：把会话以 Markdown 保存到本仓库的 `.agent-sessions/`。
+
+Cursor 使用本仓库提供的适配脚本，经 [Cursor 官方 hooks 接口](https://cursor.com/docs/hooks)
+采集事件，并通过 [Langfuse OTLP 接口](https://langfuse.com/integrations/native/opentelemetry)
+上传到课程身份网关；不是安装或改写 Codex / Claude Code 的官方 Langfuse 插件。
+脚本合并 `.cursor/hooks.json`，保留其他 hooks，重复运行不会重复添加。
 
 脚本还会生成下列本地配置：
 
@@ -99,6 +112,10 @@ git pull --ff-only
 | `.codex/langfuse.json` | Codex 的个人 Langfuse 凭据与本地留档等级 `mode` | 否 |
 | `.claude/settings.json` | 在本仓库启用 Claude Code 的两个插件 | 是 |
 | `.claude/settings.local.json` | Claude Code 的个人 Langfuse 凭据与本地留档等级 `env.RCORE_SESSION_ARCHIVE_MODE` | 否 |
+| `.cursor/hooks.example.json` | Cursor hooks 的共享示例 | 是 |
+| `.cursor/hooks.json` | 准备脚本生成的 Cursor 项目 hooks | 否 |
+| `.cursor/rcore-hooks/` | 准备脚本安装的 Cursor 运行脚本，切分支后仍保留 | 否 |
+| `.cursor/langfuse.json` | Cursor 的开关 `enabled`、个人凭据与本地留档等级 `mode` | 否 |
 | `.agent-sessions/` | 实际会话留档目录 | 否 |
 
 凭据只写入当前项目目录，不会写入用户主目录。上述个人配置、下载的 token JSON 和
@@ -130,6 +147,20 @@ claude
 Claude Code 会直接读取 `.claude/settings.local.json`，无需运行
 `/plugin configure`。
 
+Cursor：
+
+使用 **Open Folder** 打开本仓库根目录并信任工作区，再新建 Agent 会话。无需进入 Cursor
+运行插件配置命令；在 **Customize → Hooks** 检查 hooks，在 **Output → Hooks** 查看异常。
+如果未加载配置，重启 Cursor。使用 Remote SSH / WSL 时，应在项目所在的远程 / WSL
+环境运行准备脚本，并确保该环境有 `python3`。
+
+Cursor 只读取当前仓库的 `.cursor/langfuse.json`；没有这个文件或 `enabled` 不是 `true`
+时，上传和本地归档都不会启用。不往用户主目录写 Cursor 配置，也不会关闭用户自己安装的
+其他全局 hooks。为避免混入其他项目，不采集包含仓库外文件夹的多根工作区；请单独打开本仓库。
+本适配器不需要开启第三方 Claude hooks 兼容。如果以前装过其他 Cursor 会话上传 hooks，
+请检查是否仍在运行，避免同时启用两套上传；Cursor 会执行各来源匹配的 hooks，项目配置不会
+自动屏蔽全局配置。参见 [第三方 hooks 说明](https://cursor.com/docs/reference/third-party-hooks)。
+
 完成一次对话后，可检查本地是否生成了留档：
 
 ```bash
@@ -141,6 +172,7 @@ find .agent-sessions -type f -name '*.md'
 ```text
 .agent-sessions/codex/<session-id>.md
 .agent-sessions/claude-code/<session-id>.md
+.agent-sessions/cursor/<conversation-id>.md
 ```
 
 文件按轮次展示用户输入和 Agent 回答，保留消息中的代码块、列表与表格；工具命令使用
@@ -148,12 +180,14 @@ find .agent-sessions -type f -name '*.md'
 所有等级都只生成 Markdown，不另存原始 JSON/JSONL 备份，也不复制图片等二进制附件，
 附件仅记录描述或引用。Agent 自己维护的源会话文件不受影响。
 
-切换到 `ch1` 至 `ch8` 等实验分支后仍使用同一套安装结果；请始终从该仓库目录启动
-Agent。在其他目录启动时，项目配置不会生效，也不会上传或本地留档。
+Codex / Claude Code 切换实验分支后继续使用原有安装结果。Cursor 的 hooks、凭据和运行脚本
+由准备脚本放入项目内被 Git 忽略的 `.cursor` 路径，切到 `ch*` 后仍保留，实验分支不需要
+重复携带 `plugins` 源码。不要执行会清理这些本地配置的 `git clean -fdx`。
+请始终从本仓库目录启动 Agent；在其他项目中，本仓库的配置不生效。
 
 #### 5. 配置本地留档等级
 
-两个 Agent 使用各自的项目配置，归档等级互不影响。准备脚本默认设置为 `messages`，
+三个 Agent 使用各自的项目配置，归档等级互不影响。准备脚本默认设置为 `messages`，
 重新运行时保留已有选择。
 
 Codex：编辑 `.codex/langfuse.json` 的顶层 `mode` 字段，和 `enabled`、
@@ -185,6 +219,10 @@ Claude Code：编辑 `.claude/settings.local.json` 中的
 Claude Code 不需要单独的 `.claude/langfuse.json`，仅安装 Claude Code 也不会生成
 `.codex/langfuse.json`。
 
+Cursor：编辑 `.cursor/langfuse.json` 的顶层 `mode`，其余凭据字段保持不变，示例见
+[`.cursor/langfuse.example.json`](.cursor/langfuse.example.json)。将 `enabled` 改为 `false`
+会同时暂停 Cursor 的上传与归档；改回 `true` 后从后续 hook 事件继续，不回填停用期间的内容。
+
 | `mode` | 保存内容 |
 | --- | --- |
 | `messages` | 只保存学生输入和每轮 Agent 最终回答；默认值。 |
@@ -192,7 +230,7 @@ Claude Code 不需要单独的 `.claude/langfuse.json`，仅安装 Claude Code �
 | `full` | 增加中间输出、可读的推理摘要和完整工具输出，较长内容折叠展示。 |
 
 `full` 保存的是可读的会话内容，不重复保存内部传输事件、token 计数、加密字段等运行元数据。
-每次 hook 都会完整重写同一会话的 `.md` 文件，不会重复追加历史内容。升级后，同一会话
+hook 更新同一会话的 `.md` 文件，不会重复追加历史内容。Codex / Claude Code 升级后，同一会话
 成功写入 Markdown 时会清理对应的旧 `.jsonl` 留档；其他历史会话文件不会自动转换或删除。
 Claude Code 的 `Stop` 归档会同时读取 hook 携带的最终回复，避免原始会话文件尚未落盘时
 漏掉最新回答。已保存的本轮回复不会重复写入，不同轮内容相同的回答仍分别保留。
@@ -214,3 +252,37 @@ Claude Code 的 `Stop` 归档会同时读取 hook 携带的最终回复，避免
 重新处理已经结束的旧会话。修改 Claude 的 Langfuse 凭据后则应重启 Claude Code，以加载
 新的环境变量。即使使用 `messages`，输入和
 回答中也可能包含源码或隐私信息，因此不要分享 `.agent-sessions/`。
+
+#### 6. Cursor 的记录与排查
+
+Cursor 在提交输入、完成回复、工具调用等事件发生时刷新 Markdown，不读取它的内部会话
+数据库，也不复制源 transcript。最终回复直接取自 `afterAgentResponse`，无需等待源文件落盘。
+`full` 仅包含 hooks 实际提供的正文、思考摘要、工具输入/输出；不能取得的系统提示、完整
+模型请求或隐藏推理不会伪造或补全。Langfuse 上传不受本地 `mode` 限制。
+
+每个 conversation 对应一个本地文件和一个 Langfuse session，每个 generation 对应一轮 trace。
+工具开始和结束使用同一个 observation ID；相同回调重试不会新建一条完整历史，空 `stop`
+不会创建空 trace。`.agent-sessions/cursor/.state/` 的 SQLite 索引只保存 ID、时间和摘要，
+不保存消息、工具内容或凭据；请和 Markdown 一起保留，不要单独删除活动会话的索引。
+
+降低 `mode` 会在下一次事件时删去本会话 Markdown 中不再允许的内容；提高等级只影响后续
+收到的事件，无法恢复以前未留档的工具信息。更新时回到 `main` 拉取代码，再重新运行
+`cursor` 准备命令，刷新项目内的运行脚本；不会修改其他分支或其他 Agent 的缓存。
+
+网络上传失败时，本地 Markdown 仍保存。短暂网络错误会立即重试一次，当前轮的用户输入与
+最终回复还会在 `stop` 时重试；为避免在 `messages` 模式暗中存下全部工具输出，**不保存
+原始上传队列**，持续断网期间的工具事件不能保证之后自动补传。请在 Output → Hooks 检查
+`HTTP 401`（凭据无效）、`HTTP 403`（访问被拒绝）及连接错误；不要把 token 发到日志里。
+
+文件采用原子替换，终端实时观察应使用 `tail -F`（按文件名跟随），而不是 `tail -f`：
+
+```bash
+tail -F .agent-sessions/cursor/<conversation-id>.md
+```
+
+开始正式实验前，先在 Cursor 发一条测试消息，让 Agent 执行一个简单命令并回复，确认本地
+Markdown 和 Langfuse 均收到本轮记录。也可运行适配器的自动化测试（使用模拟事件，不上传真实会话）：
+
+```bash
+python3 -m unittest discover -s plugins/rcore-session-archive/tests
+```

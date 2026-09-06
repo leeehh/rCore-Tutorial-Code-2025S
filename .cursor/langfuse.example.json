@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "mode": "messages",
+  "public_key": "pk-lf-stu-你的学号",
+  "secret_key": "sk-lf-token-注册页面生成",
+  "base_url": "https://lihh18-nuc.tail6722a8.ts.net:8443",
+  "tags": ["os-lab", "rcore"]
+}

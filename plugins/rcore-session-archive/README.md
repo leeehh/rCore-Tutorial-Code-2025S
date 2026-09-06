@@ -1,13 +1,14 @@
 # rCore Session Archive
 
-This repository-local plugin keeps a configurable Markdown archive of Codex and
-Claude Code sessions. It does not upload data and does not contain Langfuse
-credentials.
+This repository-local plugin keeps configurable Markdown archives of Codex and
+Claude Code sessions. Their `archive_session.py` hook does not upload data. The
+companion `cursor_hook.py` handles both project-local Cursor archives and OTLP
+upload through the course identity gateway. No credentials are included in the plugin.
 
 ## Configuration
 
 Each agent reads its own project configuration, alongside its Langfuse credentials.
-The setup script preserves existing credentials and mode choices; both files are
+The setup script preserves existing credentials and mode choices; private files are
 ignored by Git so each student can choose a policy independently.
 
 For Codex, set the top-level `mode` in `.codex/langfuse.json`:
@@ -97,6 +98,7 @@ Archives are written to:
 ```text
 .agent-sessions/codex/<session-id>.md
 .agent-sessions/claude-code/<session-id>.md
+.agent-sessions/cursor/<conversation-id>.md
 ```
 
 After a successful Markdown refresh, the hook removes that same session's legacy
@@ -109,3 +111,70 @@ reasoning records, tool output, or secrets. Restart the agent after updating the
 plugin. Subsequent mode edits take effect at the next hook refresh without another
 restart; older archive files are not rewritten automatically. Changing Claude's
 Langfuse credentials instead requires restarting Claude Code to reload its environment.
+
+## Cursor (native project hooks)
+
+From the checkout, run:
+
+```bash
+./scripts/setup-agent-plugins.sh cursor /path/to/rcore-agent-token-<student-id>.json
+```
+
+Only Python 3.9+ and Git are required for the adapter. Cursor itself must support the
+[documented project hooks](https://cursor.com/docs/hooks). The setup command merges
+`.cursor/hooks.json` without removing unrelated hooks or duplicating its handlers.
+It writes credentials, `enabled: true` and `mode: "messages"` to the private
+`.cursor/langfuse.json`, preserving an existing mode. It does not write user-global
+Cursor configuration or install a Codex/Claude upload plugin for Cursor.
+The hooks file and installed Python runtime in `.cursor/rcore-hooks/` are ignored by
+Git, so they survive switching to lab branches without plugin source. The shared
+hook template is `.cursor/hooks.example.json`. After pulling updates on `main`, run
+setup again to refresh the project-local runtime; other agents' caches are unchanged.
+
+Open and trust the repository root in Cursor, then start a new Agent chat. Check
+Customize → Hooks and the Hooks output channel. Multi-root workspaces containing
+folders outside this checkout are excluded. For SSH/WSL, configure the checkout in
+that environment and make Python available there. This integration does not capture
+Tab completions. Do not remove the ignored runtime/configuration with `git clean -fdx`.
+
+The adapter receives `beforeSubmitPrompt`, `afterAgentResponse`, `afterAgentThought`,
+`preToolUse`, `postToolUse`, `postToolUseFailure` and `stop`. It takes the latest reply
+directly from the hook, including when `transcript_path` is absent or not flushed.
+A reply followed by another tool becomes intermediate output rather than a final
+answer. The same three local modes apply; `enabled: false` disables both Cursor
+upload and archive. Missing/invalid JSON config disables the adapter, an invalid
+mode falls back to `messages`, and each invocation re-reads the project config.
+
+Unlike the Codex/Claude transcript-based writer, this event adapter cannot recover
+previously discarded content when a mode is raised. Lowering a mode prunes stored
+content for the active conversation at its next callback. Finished conversations
+are not automatically rewritten. Markdown is the only conversation-body store.
+The private `.state/<conversation-id>.sqlite3` index contains only IDs, hashes and
+timestamps for ordering/deduplication; it contains no prompts, responses, tool
+contents or credentials. Keep it with the Markdown: if the index is missing, the
+adapter refuses to overwrite an existing archive. Generated files are replaced
+atomically (`tail -F` follows replacements); archive permissions are owner-only.
+
+Uploads use [Langfuse OTLP/HTTP JSON](https://langfuse.com/integrations/native/opentelemetry)
+at `/api/public/otel/v1/traces` with the student's Basic-auth public key/token. No
+`user_id` or Cursor email is sent; the gateway assigns the verified student identity.
+There is one session per conversation and one stable trace per generation. Tool
+start/completion updates share an observation ID, completed event retries are
+suppressed, and lifecycle-only empty turns are not exported. Shell observations use
+the existing collector's `Bash` input allowlist, with the original Cursor tool name
+in metadata. Other tools keep their real names. Remote capture includes the available
+intermediate messages and tool outputs regardless of local `mode`; model system
+prompts, usage and hidden internals absent from hooks are not fabricated.
+
+Upload attempts have a two-second network timeout and one retry for transient
+failures. The current root input/reply is retried on `stop` when necessary. There is
+no raw payload disk queue: tool events during persistent outages are not guaranteed
+to be backfilled. Local Markdown is saved before network I/O, and hook failures
+return an empty response with exit code zero without altering permission decisions.
+Redirects are refused so student credentials are never forwarded to another host.
+
+Tests run without a real Cursor process or course-server writes:
+
+```bash
+python3 -m unittest discover -s plugins/rcore-session-archive/tests
+```

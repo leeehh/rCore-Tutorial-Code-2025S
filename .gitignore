@@ -3,10 +3,15 @@
 !.codex/langfuse.example.json
 !.claude/settings.json
 !.claude/settings.local.example.json
+!.cursor/hooks.example.json
+!.cursor/langfuse.example.json
 
 # Per-student, project-local Langfuse credentials and per-agent archive modes.
 .codex/langfuse.json
 .claude/settings.local.json
+.cursor/langfuse.json
+.cursor/hooks.json
+.cursor/rcore-hooks/
 rcore-agent-token*.json
 
 # Ignore the retired policy until setup migrates and removes it.

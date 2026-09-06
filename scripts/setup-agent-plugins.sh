@@ -16,6 +16,7 @@ CREDENTIAL_FILE=""
 ARCHIVE_MODE=""
 CODEX_ARCHIVE_MODE=""
 CLAUDE_ARCHIVE_MODE=""
+CURSOR_ARCHIVE_MODE=""
 SECTION_NUMBER=0
 CURRENT_SECTION="启动检查"
 CURRENT_STEP="读取命令参数"
@@ -139,6 +140,9 @@ print_summary() {
     if [[ -n "${CLAUDE_ARCHIVE_MODE}" ]]; then
         log_detail "Claude Code 留档等级：${CLAUDE_ARCHIVE_MODE}（.claude/settings.local.json → env.RCORE_SESSION_ARCHIVE_MODE）"
     fi
+    if [[ -n "${CURSOR_ARCHIVE_MODE}" ]]; then
+        log_detail "Cursor 留档等级：${CURSOR_ARCHIVE_MODE}（.cursor/langfuse.json → mode）"
+    fi
     log_detail "个人凭据：仅保存在项目配置目录，已忽略 Git 提交"
 
     printf '\n%s接下来%s\n' "${UI_BOLD}" "${UI_RESET}"
@@ -151,18 +155,24 @@ print_summary() {
             "Claude Code")
                 log_info "Claude Code：从本仓库重新启动，或在已有会话执行 /reload-plugins。"
                 ;;
+            Cursor)
+                log_info "Cursor：打开并信任本仓库文件夹，再新建 Agent 会话；在 Output → Hooks 查看异常。"
+                ;;
         esac
     done
 }
 
 usage() {
     cat <<'EOF'
-用法：./scripts/setup-agent-plugins.sh [auto|codex|claude|all] [credential.json]
+用法：./scripts/setup-agent-plugins.sh [auto|codex|claude|cursor|all] [credential.json]
 
   auto    配置本机已安装的 Agent（默认）
   codex   仅配置 Codex 的上传和本地归档插件
   claude  仅配置 Claude Code 的上传和本地归档插件
-  all     配置两者；缺少任一 Agent 时会报错
+  cursor  仅配置 Cursor 项目 hooks；无需 Cursor 命令行、Node.js 或 uv
+  all     配置三者；Codex / Claude Code CLI 缺失时会报错
+
+auto 通过 CLI 检测 Agent；只安装 Cursor 图形界面时，请显式使用 cursor。
 
 插件全局关闭，仅在本仓库启用。请先注册并下载个人凭据 JSON：
   https://lihh18-nuc.tail6722a8.ts.net:10000/register
@@ -221,7 +231,7 @@ if config_path.is_file():
         raise SystemExit(f"error: existing {agent_name} config must be a JSON object")
     output.update(existing)
 
-if agent_name == "Codex":
+if agent_name in {"Codex", "Cursor"}:
     output.update({
         "enabled": True,
         "public_key": public_key,
@@ -266,7 +276,7 @@ except BaseException:
     raise
 PY
         log_info "已写入 ${agent_name} 个人凭据：${config_path}"
-    elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" ]]; then
+    elif [[ ! -e "${config_path}" || "${agent_name}" == "Codex" || "${agent_name}" == "Cursor" ]]; then
         local config_status
         # Older Claude-only setups may have created a mode-only Codex config.
         # Fill missing fields from the template while preserving existing values.
@@ -300,7 +310,7 @@ if output != existing or not config_path.exists():
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
-needs_credentials = sys.argv[3] != "Codex" or not output.get("base_url") or any(
+needs_credentials = sys.argv[3] not in {"Codex", "Cursor"} or not output.get("base_url") or any(
     not output.get(key) or output[key] == template[key]
     for key in ("public_key", "secret_key")
 )
@@ -347,6 +357,8 @@ mode = "messages"
 paths = [".codex/langfuse.json", ".agents/session-archive.json"]
 if agent_name == "claude":
     paths.insert(0, ".claude/settings.local.json")
+elif agent_name == "cursor":
+    paths = [".cursor/langfuse.json"]
 elif agent_name != "codex":
     raise SystemExit(f"error: unsupported agent: {agent_name}")
 for relative_path in paths:
@@ -384,9 +396,14 @@ prepare_archive_config() {
     case "${agent_name}" in
         codex) ;;
         claude) config_path="${REPOSITORY_ROOT}/.claude/settings.local.json" ;;
+        cursor) config_path="${REPOSITORY_ROOT}/.cursor/langfuse.json" ;;
         *) log_error "不支持的配置目标：${agent_name}"; return 1 ;;
     esac
     local legacy_path="${REPOSITORY_ROOT}/.agents/session-archive.json"
+    # Cursor has never used the retired shared policy. Leave it for Codex/Claude migration.
+    if [[ "${agent_name}" == "cursor" ]]; then
+        legacy_path=""
+    fi
     local legacy_existed=0
     if [[ -e "${legacy_path}" || -L "${legacy_path}" ]]; then
         legacy_existed=1
@@ -433,15 +450,17 @@ except BaseException:
 
 # Only remove the superseded file after the new mode and credentials were
 # atomically saved. The .agents/plugins marketplace remains in place.
-legacy_path = Path(sys.argv[3])
+legacy_path = Path(sys.argv[3]) if sys.argv[3] else None
 try:
-    if legacy_path.exists() or legacy_path.is_symlink():
+    if legacy_path is not None and (legacy_path.exists() or legacy_path.is_symlink()):
         legacy_path.unlink()
 except OSError as error:
     raise SystemExit(f"error: mode was saved, but cannot remove legacy configuration {legacy_path}: {error}")
 PY
     if [[ "${agent_name}" == "claude" ]]; then
         CLAUDE_ARCHIVE_MODE="${ARCHIVE_MODE}"
+    elif [[ "${agent_name}" == "cursor" ]]; then
+        CURSOR_ARCHIVE_MODE="${ARCHIVE_MODE}"
     else
         CODEX_ARCHIVE_MODE="${ARCHIVE_MODE}"
     fi
@@ -764,6 +783,35 @@ setup_claude() {
     log_success "Claude Code 安装步骤完成"
 }
 
+setup_cursor() {
+    begin_section "Cursor"
+    begin_step "检查 Cursor 项目配置目录"
+    local cursor_path
+    for cursor_path in ".cursor" ".cursor/langfuse.json" ".cursor/hooks.json" ".cursor/rcore-hooks"; do
+        if [[ -L "${REPOSITORY_ROOT}/${cursor_path}" ]]; then
+            log_error "${cursor_path} 是符号链接；为避免写入项目外部，请使用项目内的普通目录或文件。"
+            return 1
+        fi
+    done
+    complete_step
+    begin_step "读取 Cursor 本地归档等级"
+    read_archive_config cursor
+    complete_step
+    log_info "使用 Cursor 原生项目 hooks；不安装全局 hooks，不需要启动 Cursor 进程。"
+    begin_step "准备 Cursor 项目凭据配置"
+    prepare_private_config \
+        "${REPOSITORY_ROOT}/.cursor/langfuse.example.json" \
+        "${REPOSITORY_ROOT}/.cursor/langfuse.json" \
+        "Cursor"
+    prepare_archive_config cursor
+    complete_step
+    run_command "配置 Cursor 项目上传与归档 hooks（保留其他 hooks）" \
+        python3 "${SCRIPT_DIR}/../plugins/rcore-session-archive/scripts/cursor_hook.py" \
+        --install "${REPOSITORY_ROOT}"
+    COMPLETED_AGENTS+=("Cursor")
+    log_success "Cursor 配置完成"
+}
+
 main() {
     local target="${1:-auto}"
     local configured=0
@@ -779,7 +827,7 @@ main() {
     log_detail "项目目录：${REPOSITORY_ROOT}"
     log_detail "配置目标：${target}"
     case "${target}" in
-        auto|codex|claude|all) ;;
+        auto|codex|claude|cursor|all) ;;
         *)
             log_error "不支持的配置目标：${target}"
             usage >&2
@@ -818,9 +866,15 @@ main() {
             else
                 log_info "跳过 Claude Code：未检测到 CLI（auto 模式）。"
             fi
+            if command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then
+                setup_cursor
+                configured=1
+            else
+                log_info "跳过 Cursor：未检测到 CLI；仅安装图形界面时请使用 cursor 配置目标。"
+            fi
             if [[ "${configured}" -eq 0 ]]; then
                 CURRENT_STEP="检测可配置的 Agent"
-                log_error "未找到 Codex 或 Claude Code；请先安装至少一个 Agent。"
+                log_error "未找到 Agent CLI；请先安装 Agent。Cursor 图形界面用户可改用 cursor 配置目标。"
                 exit 1
             fi
             ;;
@@ -830,9 +884,13 @@ main() {
         claude)
             setup_claude
             ;;
+        cursor)
+            setup_cursor
+            ;;
         all)
             setup_codex
             setup_claude
+            setup_cursor
             ;;
     esac
 
